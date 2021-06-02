@@ -1331,8 +1331,6 @@ func (s *cmdIntegrationSuite) TestCopyWithDFSResource(c *chk.C) {
 
 		// validate that the right number of transfers were scheduled
 		c.Assert(len(mockedRPC.transfers), chk.Equals, 1)
-
-		//c.Assert(mockedRPC.transfers[0].Destination, chk.Equals, "/file")
 	})
 
 	//2. Verify Sync between dfs and dfs works.
@@ -1349,8 +1347,6 @@ func (s *cmdIntegrationSuite) TestCopyWithDFSResource(c *chk.C) {
 
 		// validate that the right number of transfers were scheduled
 		c.Assert(len(mockedRPC.transfers), chk.Equals, 2)
-
-		//c.Assert(mockedRPC.transfers[0].Destination, chk.Equals, "/file2")
 	})
 
 }

@@ -255,7 +255,9 @@ func (raw rawCopyCmdArgs) cook() (cookedCopyCmdArgs, error) {
 		azcopyScanningLogger.CloseLog()
 	})
 
-	/* We support DFS by using blob end-point of the account. We replace dfs by blob in src and dst */
+	// We support DFS by using blob end-point of the account. We replace dfs by blob in src and dst
+	// PS: DFS endpoints are being deprecated by Azure service. All the APIs which required DFS endpoints,
+	// like SetAcl, SetAcl, GetDirectoryProperties are being ported to blob endpoint
 	if src,dst := inferArgumentLocation(raw.src), inferArgumentLocation(raw.dst);
 				src == common.ELocation.BlobFS() || dst == common.ELocation.BlobFS() {
 		if src == common.ELocation.BlobFS() && dst != common.ELocation.Local() {
