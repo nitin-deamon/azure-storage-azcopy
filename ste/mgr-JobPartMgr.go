@@ -59,6 +59,7 @@ type IJobPartMgr interface {
 	IsSourceEncrypted() bool
   /* Status Manager Updates */
 	SendXferDoneMsg(msg xferDoneMsg)
+	FlushMMF()
 }
 
 type serviceAPIVersionOverride struct{}
@@ -316,6 +317,7 @@ func (jpm *jobPartMgr) getFolderCreationTracker() common.FolderCreationTracker {
 	return jpm.jobMgrInitState.folderCreationTracker
 }
 
+func (jpm *jobPartMgr) FlushMMF() {jpm.planMMF.Flush()}
 func (jpm *jobPartMgr) Plan() *JobPartPlanHeader { return jpm.planMMF.Plan() }
 
 // ScheduleTransfers schedules this job part's transfers. It is called when a new job part is ordered & is also called to resume a paused Job

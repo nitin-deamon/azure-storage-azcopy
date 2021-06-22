@@ -33,6 +33,8 @@ func (mmf *JobPartPlanMMF) Plan() *JobPartPlanHeader {
 }
 func (mmf *JobPartPlanMMF) Unmap() { (*common.MMF)(mmf).Unmap() }
 
+func (mmf *JobPartPlanMMF) Flush() {(*common.MMF)(mmf).Flush()}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // JobPartPlanHeader represents the header of Job Part's memory-mapped file

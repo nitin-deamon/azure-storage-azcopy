@@ -357,6 +357,7 @@ func ResumeJobOrder(req common.ResumeJobRequest) common.CancelPauseResumeRespons
 			})
 
 		jpp0.SetJobStatus(common.EJobStatus.InProgress())
+		jpm.FlushMMF()
 
 		if jm.ShouldLog(pipeline.LogInfo) {
 			jm.Log(pipeline.LogInfo, fmt.Sprintf("JobID=%v resumed", req.JobID))

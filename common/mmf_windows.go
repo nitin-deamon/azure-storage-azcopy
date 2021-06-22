@@ -118,6 +118,11 @@ func (m *MMF) Slice() []byte {
 	return m.slice
 }
 
+func (m *MMF) Flush() {
+	addr := uintptr(unsafe.Pointer(&(([]byte)(m.slice)[0])))
+	syscall.FlushViewOfFile(addr, uintptr(m.length))
+}
+
 type memoryRangeEntry struct {
 	VirtualAddress uintptr
 	NumberOfBytes  int
