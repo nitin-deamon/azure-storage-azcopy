@@ -23,7 +23,7 @@ type gcpTraverser struct {
 	incrementEnumerationCounter enumerationCounterFunc
 }
 
-func (t *gcpTraverser) isDirectory(isSource bool) bool {
+func (t *gcpTraverser) IsDirectory(isSource bool) bool {
 	//Identify whether directory or not syntactically
 	isDirDirect := !t.gcpURLParts.IsObjectSyntactically() && (t.gcpURLParts.IsDirectorySyntactically() || t.gcpURLParts.IsBucketSyntactically())
 	if !isSource {
@@ -39,7 +39,7 @@ func (t *gcpTraverser) isDirectory(isSource bool) bool {
 	return false
 }
 
-func (t *gcpTraverser) traverse(preprocessor objectMorpher, processor objectProcessor, filters []objectFilter) error {
+func (t *gcpTraverser) Traverse(preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) error {
 	//Syntactically ensure whether single object or not
 	if t.gcpURLParts.IsObjectSyntactically() && !t.gcpURLParts.IsDirectorySyntactically() && !t.gcpURLParts.IsBucketSyntactically() {
 		objectPath := strings.Split(t.gcpURLParts.ObjectKey, "/")
@@ -49,7 +49,7 @@ func (t *gcpTraverser) traverse(preprocessor objectMorpher, processor objectProc
 		if err == nil {
 			glcm.Info(fmt.Sprintf("Bucket: %v, Object: %v, Type: %v\n", attrs.Bucket, attrs.Name, attrs.ContentType))
 			gie := common.GCPObjectInfoExtension{ObjectInfo: *attrs}
-			storedObject := newStoredObject(
+			StoredObject := newStoredObject(
 				preprocessor,
 				objectName,
 				"",
@@ -60,7 +60,7 @@ func (t *gcpTraverser) traverse(preprocessor objectMorpher, processor objectProc
 				noBlobProps,
 				gie.NewCommonMetadata(),
 				t.gcpURLParts.BucketName)
-			err = processIfPassedFilters(filters, storedObject,
+			err = processIfPassedFilters(filters, StoredObject,
 				processor)
 			if err != nil {
 				return err
@@ -108,7 +108,7 @@ func (t *gcpTraverser) traverse(preprocessor objectMorpher, processor objectProc
 				oie = common.GCPObjectInfoExtension{ObjectInfo: *oi}
 			}
 
-			storedObject := newStoredObject(
+			StoredObject := newStoredObject(
 				preprocessor,
 				objectName,
 				relativePath,
@@ -121,7 +121,7 @@ func (t *gcpTraverser) traverse(preprocessor objectMorpher, processor objectProc
 				t.gcpURLParts.BucketName)
 
 			err = processIfPassedFilters(filters,
-				storedObject,
+				StoredObject,
 				processor)
 			if err != nil {
 				return err

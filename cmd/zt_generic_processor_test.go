@@ -35,8 +35,8 @@ var _ = chk.Suite(&genericProcessorSuite{})
 type processorTestSuiteHelper struct{}
 
 // return a list of sample entities
-func (processorTestSuiteHelper) getSampleObjectList() []storedObject {
-	return []storedObject{
+func (processorTestSuiteHelper) getSampleObjectList() []StoredObject {
+	return []StoredObject{
 		{name: "file1", relativePath: "file1", lastModifiedTime: time.Now()},
 		{name: "file2", relativePath: "file2", lastModifiedTime: time.Now()},
 		{name: "file3", relativePath: "sub1/file3", lastModifiedTime: time.Now()},
@@ -47,10 +47,10 @@ func (processorTestSuiteHelper) getSampleObjectList() []storedObject {
 }
 
 // given a list of entities, return the relative paths in a list, to help with validations
-func (processorTestSuiteHelper) getExpectedTransferFromStoredObjectList(storedObjectList []storedObject) []string {
+func (processorTestSuiteHelper) getExpectedTransferFromStoredObjectList(StoredObjectList []StoredObject) []string {
 	expectedTransfers := make([]string, 0)
-	for _, storedObject := range storedObjectList {
-		expectedTransfers = append(expectedTransfers, storedObject.relativePath)
+	for _, StoredObject := range StoredObjectList {
+		expectedTransfers = append(expectedTransfers, StoredObject.relativePath)
 	}
 
 	return expectedTransfers
@@ -81,8 +81,8 @@ func (s *genericProcessorSuite) TestCopyTransferProcessorMultipleFiles(c *chk.C)
 			newRemoteRes(containerURL.String()), newLocalRes(dstDirName), nil, nil, false)
 
 		// go through the objects and make sure they are processed without error
-		for _, storedObject := range sampleObjects {
-			err := copyProcessor.scheduleCopyTransfer(storedObject)
+		for _, StoredObject := range sampleObjects {
+			err := copyProcessor.scheduleCopyTransfer(StoredObject)
 			c.Assert(err, chk.IsNil)
 		}
 
@@ -128,8 +128,8 @@ func (s *genericProcessorSuite) TestCopyTransferProcessorSingleFile(c *chk.C) {
 		newRemoteRes(blobURL), newLocalRes(filepath.Join(dstDirName, dstFileName)), nil, nil, false)
 
 	// exercise the copy transfer processor
-	storedObject := newStoredObject(noPreProccessor, blobList[0], "", common.EEntityType.File(), time.Now(), 0, noContentProps, noBlobProps, noMetdata, "")
-	err := copyProcessor.scheduleCopyTransfer(storedObject)
+	StoredObject := newStoredObject(NoPreProccessor, blobList[0], "", common.EEntityType.File(), time.Now(), 0, noContentProps, noBlobProps, noMetdata, "")
+	err := copyProcessor.scheduleCopyTransfer(StoredObject)
 	c.Assert(err, chk.IsNil)
 
 	// no part should have been dispatched

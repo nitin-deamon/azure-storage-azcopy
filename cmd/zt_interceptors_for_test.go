@@ -158,11 +158,11 @@ func (*mockedLifecycleManager) GatherAllLogs(channel chan string) (result []stri
 }
 
 type dummyProcessor struct {
-	record []storedObject
+	record []StoredObject
 }
 
-func (d *dummyProcessor) process(storedObject storedObject) (err error) {
-	d.record = append(d.record, storedObject)
+func (d *dummyProcessor) process(StoredObject StoredObject) (err error) {
+	d.record = append(d.record, StoredObject)
 	return
 }
 

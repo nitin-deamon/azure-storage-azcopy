@@ -45,7 +45,7 @@ type s3Traverser struct {
 	incrementEnumerationCounter enumerationCounterFunc
 }
 
-func (t *s3Traverser) isDirectory(isSource bool) bool {
+func (t *s3Traverser) IsDirectory(isSource bool) bool {
 	// Do a basic syntax check
 	isDirDirect := !t.s3URLParts.IsObjectSyntactically() && (t.s3URLParts.IsDirectorySyntactically() || t.s3URLParts.IsBucketSyntactically())
 
@@ -63,7 +63,7 @@ func (t *s3Traverser) isDirectory(isSource bool) bool {
 	return false
 }
 
-func (t *s3Traverser) traverse(preprocessor objectMorpher, processor objectProcessor, filters []objectFilter) (err error) {
+func (t *s3Traverser) Traverse(preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) (err error) {
 	// Check if resource is a single object.
 	if t.s3URLParts.IsObjectSyntactically() && !t.s3URLParts.IsDirectorySyntactically() && !t.s3URLParts.IsBucketSyntactically() {
 		objectPath := strings.Split(t.s3URLParts.ObjectKey, "/")
@@ -77,7 +77,7 @@ func (t *s3Traverser) traverse(preprocessor objectMorpher, processor objectProce
 		if err == nil {
 			// We had to statObject anyway, get ALL the info.
 			oie := common.ObjectInfoExtension{ObjectInfo: oi}
-			storedObject := newStoredObject(
+			StoredObject := newStoredObject(
 				preprocessor,
 				objectName,
 				"",
@@ -91,7 +91,7 @@ func (t *s3Traverser) traverse(preprocessor objectMorpher, processor objectProce
 
 			err = processIfPassedFilters(
 				filters,
-				storedObject,
+				StoredObject,
 				processor)
 			_, err = getProcessingError(err)
 			if err != nil {
@@ -143,7 +143,7 @@ func (t *s3Traverser) traverse(preprocessor objectMorpher, processor objectProce
 			}
 			oie = common.ObjectInfoExtension{ObjectInfo: oi}
 		}
-		storedObject := newStoredObject(
+		StoredObject := newStoredObject(
 			preprocessor,
 			objectName,
 			relativePath,
@@ -156,7 +156,7 @@ func (t *s3Traverser) traverse(preprocessor objectMorpher, processor objectProce
 			t.s3URLParts.BucketName)
 
 		err = processIfPassedFilters(filters,
-			storedObject,
+			StoredObject,
 			processor)
 		_, err = getProcessingError(err)
 		if err != nil {

@@ -34,23 +34,23 @@ type attrFilter struct {
 	isIncludeFilter bool
 }
 
-func (f *attrFilter) doesSupportThisOS() (msg string, supported bool) {
+func (f *attrFilter) DoesSupportThisOS() (msg string, supported bool) {
 	msg = ""
 	supported = true
 	return
 }
 
-func (f *attrFilter) appliesOnlyToFiles() bool {
+func (f *attrFilter) AppliesOnlyToFiles() bool {
 	return true // keep this filter consistent with include-pattern
 }
 
-func (f *attrFilter) doesPass(storedObject storedObject) bool {
+func (f *attrFilter) DoesPass(StoredObject StoredObject) bool {
 	fileName := ""
 	if strings.Index(f.filePath, "*") == -1 {
-		fileName = common.GenerateFullPath(f.filePath, storedObject.relativePath)
+		fileName = common.GenerateFullPath(f.filePath, StoredObject.relativePath)
 	} else {
 		basePath := getPathBeforeFirstWildcard(f.filePath)
-		fileName = common.GenerateFullPath(basePath, storedObject.relativePath)
+		fileName = common.GenerateFullPath(basePath, StoredObject.relativePath)
 	}
 
 	lpFileName, _ := syscall.UTF16PtrFromString(fileName)
@@ -60,7 +60,7 @@ func (f *attrFilter) doesPass(storedObject storedObject) bool {
 	// let the filter pass
 	if err != nil {
 		glcm.Info(fmt.Sprintf("Skipping file attribute filter for file %s due to error: %s",
-			storedObject.relativePath, err))
+			StoredObject.relativePath, err))
 		return true
 	}
 
@@ -74,9 +74,9 @@ func (f *attrFilter) doesPass(storedObject storedObject) bool {
 	return !f.isIncludeFilter
 }
 
-func buildAttrFilters(attributes []string, fullPath string, isIncludeFilter bool) []objectFilter {
+func buildAttrFilters(attributes []string, fullPath string, isIncludeFilter bool) []ObjectFilter {
 	var fileAttributes uint32
-	filters := make([]objectFilter, 0)
+	filters := make([]ObjectFilter, 0)
 	// Available attributes (SMB) include:
 	// R = Read-only files
 	// A = Files ready for archiving

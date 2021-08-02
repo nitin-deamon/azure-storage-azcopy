@@ -40,7 +40,7 @@ type blobVersionsTraverser struct {
 	cpkOptions                  common.CpkOptions
 }
 
-func (t *blobVersionsTraverser) isDirectory(isSource bool) bool {
+func (t *blobVersionsTraverser) IsDirectory(isSource bool) bool {
 	isDirDirect := copyHandlerUtil{}.urlIsContainerOrVirtualDirectory(t.rawURL)
 
 	// Skip the single blob check if we're checking a destination.
@@ -69,7 +69,7 @@ func (t *blobVersionsTraverser) getBlobProperties(versionID string) (props *azbl
 	return props, err
 }
 
-func (t *blobVersionsTraverser) traverse(preprocessor objectMorpher, processor objectProcessor, filters []objectFilter) (err error) {
+func (t *blobVersionsTraverser) Traverse(preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) (err error) {
 	blobURLParts := azblob.NewBlobURLParts(*t.rawURL)
 
 	versionID, ok := <-t.listOfVersionIds
@@ -84,7 +84,7 @@ func (t *blobVersionsTraverser) traverse(preprocessor objectMorpher, processor o
 			panic("isBlob should never be set if getting properties is an error")
 		}
 		blobURLParts.VersionID = versionID
-		storedObject := newStoredObject(
+		StoredObject := newStoredObject(
 			preprocessor,
 			getObjectNameOnly(strings.TrimSuffix(blobURLParts.BlobName, common.AZCOPY_PATH_SEPARATOR_STRING)),
 			"",
@@ -96,13 +96,13 @@ func (t *blobVersionsTraverser) traverse(preprocessor objectMorpher, processor o
 			common.FromAzBlobMetadataToCommonMetadata(blobProperties.NewMetadata()),
 			blobURLParts.ContainerName,
 		)
-		storedObject.blobVersionID = versionID
+		StoredObject.blobVersionID = versionID
 
 		if t.incrementEnumerationCounter != nil {
 			t.incrementEnumerationCounter(common.EEntityType.File())
 		}
 
-		err = processIfPassedFilters(filters, storedObject, processor)
+		err = processIfPassedFilters(filters, StoredObject, processor)
 		if err != nil {
 			return err
 		}
