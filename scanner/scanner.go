@@ -44,50 +44,24 @@ type rawScanCmdArgs struct {
 	fromTo string
 	//blobUrlForRedirection string
 
-	// new include/exclude only apply to file names
-	// implemented for remove (and sync) only
-	include               string
-	exclude               string
-	includePath           string // NOTE: This gets handled like list-of-files! It may LOOK like a bug, but it is not.
-	excludePath           string
-	includeFileAttributes string
-	excludeFileAttributes string
 	includeBefore         string
 	includeAfter          string
-	legacyInclude         string // used only for warnings
-	legacyExclude         string // used only for warnings
 	listOfVersionIDs      string
 
 	// filters from flags
 	listOfFilesToCopy string
 	recursive         bool
 	followSymlinks    bool
-	autoDecompress    bool
 	// forceWrite flag is used to define the User behavior
 	// to overwrite the existing blobs or not.
 	forceWrite      string
 	forceIfReadOnly bool
 
 	// options from flags
-	blockSizeMB              float64
-	metadata                 string
-	contentType              string
-	contentEncoding          string
-	contentDisposition       string
-	contentLanguage          string
-	cacheControl             string
-	noGuessMimeType          bool
 	preserveLastModifiedTime bool
 	putMd5                   bool
 	md5ValidationOption      string
 	CheckLength              bool
-	deleteSnapshotsOption    string
-
-	blobTags string
-	// defines the type of the blob at the destination in case of upload / account to account copy
-	blobType      string
-	blockBlobTier string
-	pageBlobTier  string
 	output        string // TODO: Is this unused now? replaced with param at root level?
 	logVerbosity  string
 	// list of blobTypes to exclude while enumerating the transfer
@@ -98,35 +72,12 @@ type rawScanCmdArgs struct {
 	// Opt-in flag to persist additional SMB properties to Azure Files. Named ...info instead of ...properties
 	// because the latter was similar enough to preserveSMBPermissions to induce user error
 	preserveSMBInfo bool
-	// Opt-in flag to preserve the blob index tags during service to service transfer.
-	s2sPreserveBlobTags bool
 	// Flag to enable Window's special privileges
 	backupMode bool
 	// whether user wants to preserve full properties during service to service copy, the default value is true.
 	// For S3 and Azure File non-single file source, as list operation doesn't return full properties of objects/files,
-	// to preserve full properties AzCopy needs to send one additional request per object/file.
-	s2sPreserveProperties bool
-	// useful when preserveS3Properties set to true, enables get S3 objects' or Azure files' properties during s2s copy in backend, the default value is true
-	s2sGetPropertiesInBackend bool
-	// whether user wants to preserve access tier during service to service copy, the default value is true.
-	// In some case, e.g. target is a GPv1 storage account, access tier cannot be set properly.
-	// In such cases, use s2sPreserveAccessTier=false to bypass the access tier copy.
-	// For more details, please refer to https://docs.microsoft.com/en-us/azure/storage/blobs/storage-blob-storage-tiers
-	s2sPreserveAccessTier bool
-	// whether user wants to check if source has changed after enumerating, the default value is true.
-	// For S2S copy, as source is a remote resource, validating whether source has changed need additional request costs.
-	s2sSourceChangeValidation bool
 	// specify how user wants to handle invalid metadata.
 	s2sInvalidMetadataHandleOption string
-
-	// internal override to enforce strip-top-dir
-	internalOverrideStripTopDir bool
-
-	// whether to include blobs that have metadata 'hdi_isfolder = true'
-	includeDirectoryStubs bool
-
-	// whether to disable automatic decoding of illegal chars on Windows
-	disableAutoDecoding bool
 
 	// Optional flag to encrypt user data with user provided key.
 	// Key is provide in the REST request itself
@@ -138,6 +89,12 @@ type rawScanCmdArgs struct {
 	cpkScopeInfo string
 }
 
+// This function parse and validate the inputs src and destination
+// and fill the CopyCmdArgs structure which is used to initialise the 
+// Enumerator. This code need cleaning on basisi of requirement.
+// Right now only source and destination folder passed. 
+// In future if we want to use custom input like include folders , exclude folder or listoffiles 
+// Other options already supported in azcopy we enhance this function or export CopyCmd cook function.
 func (raw rawScanCmdArgs) scanner_cook() (cmd.CookedCopyCmdArgs, error) {
 	cooked := cmd.CookedCopyCmdArgs{
 	}
@@ -247,7 +204,12 @@ func (raw rawScanCmdArgs) scanner_cook() (cmd.CookedCopyCmdArgs, error) {
 	return cooked, nil
 }
 
-
+// This function init the traverser according to source. 
+// Apart from that it create two callback functions.
+// 1. Callback function :- Processor (Right now we just printing the file which come for processing)
+//    This function we will utilise to pass it to STE or function which do further processing.
+// 2. Callbacl function :- Finalizer Right now its not doing anything. This function get called on end of Traversing.
+//    We can utilise this Finalizer to send the status to Azure Control Plane to tell number of files need to to transferred.
 func ScanInitEnumerator(cca cmd.CookedCopyCmdArgs, ctx context.Context) (*cmd.CopyEnumerator, error) {
 	var traverser cmd.ResourceTraverser
 
@@ -305,25 +267,6 @@ func ScanInitEnumerator(cca cmd.CookedCopyCmdArgs, ctx context.Context) (*cmd.Co
 
 	if err != nil {
 		return nil, err
-	}
-
-	// Disallow list-of-files and include-path on service-level traversal due to a major bug
-	// TODO: Fix the bug.
-	//       Two primary issues exist with the list-of-files implementation:
-	//       1) Account name doesn't get trimmed from the path
-	//       2) List-of-files is not considered an account traverser; therefore containers don't get made.
-	//       Resolve these two issues and service-level list-of-files/include-path will work
-	if cca.ListOfFilesChannel != nil && srcLevel == cmd.ELocationLevel.Service() {
-		return nil, errors.New("cannot combine list-of-files or include-path with account traversal")
-	}
-
-	if (srcLevel == cmd.ELocationLevel.Object() || cca.FromTo.From().IsLocal()) && dstLevel == cmd.ELocationLevel.Service() {
-		return nil, errors.New("cannot transfer individual files/folders to the root of a service. Add a container or directory to the destination URL")
-	}
-
-	// When copying a container directly to a container, strip the top directory
-	if srcLevel == cmd.ELocationLevel.Container() && dstLevel == cmd.ELocationLevel.Container() && cca.FromTo.From().IsRemote() && cca.FromTo.To().IsRemote() {
-		cca.StripTopDir = true
 	}
 
 	// Create a Remote resource resolver
