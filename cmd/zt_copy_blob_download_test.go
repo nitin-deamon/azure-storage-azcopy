@@ -73,7 +73,7 @@ func (s *cmdIntegrationSuite) TestInferredStripTopDirDownload(c *chk.C) {
 	// Test inference of striptopdir
 	cooked, err := raw.cook()
 	c.Assert(err, chk.IsNil)
-	c.Assert(cooked.stripTopDir, chk.Equals, false)
+	c.Assert(cooked.StripTopDir, chk.Equals, false)
 
 	// Test and ensure only one file is being downloaded
 	runCopyAndVerify(c, raw, func(err error) {
@@ -100,7 +100,7 @@ func (s *cmdIntegrationSuite) TestInferredStripTopDirDownload(c *chk.C) {
 	// Test inference of striptopdir
 	cooked, err = raw.cook()
 	c.Assert(err, chk.IsNil)
-	c.Assert(cooked.stripTopDir, chk.Equals, true)
+	c.Assert(cooked.StripTopDir, chk.Equals, true)
 
 	// Test and ensure only 3 files get scheduled, nothing under the sub-directory
 	runCopyAndVerify(c, raw, func(err error) {
@@ -149,7 +149,7 @@ func (s *cmdIntegrationSuite) TestInferredStripTopDirDownload(c *chk.C) {
 	// test cook
 	cooked, err = raw.cook()
 	c.Assert(err, chk.IsNil)
-	c.Assert(cooked.stripTopDir, chk.Equals, true)
+	c.Assert(cooked.StripTopDir, chk.Equals, true)
 
 	// Test and ensure only one file got scheduled
 	runCopyAndVerify(c, raw, func(err error) {
@@ -163,7 +163,7 @@ func (s *cmdIntegrationSuite) TestInferredStripTopDirDownload(c *chk.C) {
 func (s *cmdIntegrationSuite) TestDownloadAccount(c *chk.C) {
 	bsu := getBSU()
 	rawBSU := scenarioHelper{}.getRawBlobServiceURLWithSAS(c)
-	p, err := initPipeline(ctx, common.ELocation.Blob(), common.CredentialInfo{CredentialType: common.ECredentialType.Anonymous()}, pipeline.LogNone)
+	p, err := InitPipeline(ctx, common.ELocation.Blob(), common.CredentialInfo{CredentialType: common.ECredentialType.Anonymous()}, pipeline.LogNone)
 	c.Assert(err, chk.IsNil)
 
 	// Just in case there are no existing containers...
@@ -179,7 +179,7 @@ func (s *cmdIntegrationSuite) TestDownloadAccount(c *chk.C) {
 		relPaths = append(relPaths, relPath)
 		return nil
 	}
-	err = blobTraverser.traverse(NoPreProccessor, processor, []ObjectFilter{})
+	err = blobTraverser.Traverse(NoPreProccessor, processor, []ObjectFilter{})
 	c.Assert(err, chk.IsNil)
 
 	// set up a destination
@@ -205,7 +205,7 @@ func (s *cmdIntegrationSuite) TestDownloadAccount(c *chk.C) {
 func (s *cmdIntegrationSuite) TestDownloadAccountWildcard(c *chk.C) {
 	bsu := getBSU()
 	rawBSU := scenarioHelper{}.getRawBlobServiceURLWithSAS(c)
-	p, err := initPipeline(ctx, common.ELocation.Blob(), common.CredentialInfo{CredentialType: common.ECredentialType.Anonymous()}, pipeline.LogNone)
+	p, err := InitPipeline(ctx, common.ELocation.Blob(), common.CredentialInfo{CredentialType: common.ECredentialType.Anonymous()}, pipeline.LogNone)
 	c.Assert(err, chk.IsNil)
 
 	// Create a unique container to be targeted.
@@ -227,7 +227,7 @@ func (s *cmdIntegrationSuite) TestDownloadAccountWildcard(c *chk.C) {
 		relPaths = append(relPaths, relPath)
 		return nil
 	}
-	err = blobTraverser.traverse(NoPreProccessor, processor, []ObjectFilter{})
+	err = blobTraverser.Traverse(NoPreProccessor, processor, []ObjectFilter{})
 	c.Assert(err, chk.IsNil)
 
 	// set up a destination
