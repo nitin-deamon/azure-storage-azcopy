@@ -21,17 +21,18 @@
 package ste
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 )
 
 type JobPartCreatedMsg struct {
-	TotalTransfers uint32
-	IsFinalPart    bool
+	TotalTransfers       uint32
+	IsFinalPart          bool
 	TotalBytesEnumerated uint64
-	FileTransfers  uint32
-	FolderTransfer uint32
+	FileTransfers        uint32
+	FolderTransfer       uint32
 }
 
 type xferDoneMsg = common.TransferDetail
@@ -41,6 +42,7 @@ type jobStatusManager struct {
 	listReq     chan bool
 	partCreated chan JobPartCreatedMsg
 	xferDone    chan xferDoneMsg
+	done        chan bool
 }
 
 /* These functions should not fail */
@@ -61,6 +63,11 @@ func (jm *jobMgr) ResurrectSummary(js common.ListJobSummaryResponse) {
 	jm.jstm.js = js
 }
 
+func (jm *jobMgr) JobStatusMgrClean() {
+	fmt.Println("Job Status Manager Done Called")
+	jm.jstm.done <- true
+}
+
 func (jm *jobMgr) handleStatusUpdateMessage() {
 	jstm := jm.jstm
 	js := &jstm.js
@@ -70,6 +77,8 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 
 	for {
 		select {
+		case <-jm.Context().Done():
+			return
 		case msg := <-jstm.partCreated:
 			js.CompleteJobOrdered = js.CompleteJobOrdered || msg.IsFinalPart
 			js.TotalTransfers += msg.TotalTransfers
@@ -101,6 +110,10 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 			/* Display stats */
 			js.Timestamp = time.Now().UTC()
 			jstm.respChan <- *js
+
+		case <-jstm.done:
+			fmt.Println("Cleanup JobStatusmgr")
+			return
 		}
 	}
 }
