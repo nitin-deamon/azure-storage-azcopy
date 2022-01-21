@@ -102,6 +102,7 @@ type IJobMgr interface {
 	JobStatusMgrClean()
 	JobPartsMgrsDelete()
 	ChunkStatusLoggerCleanup()
+	TransferRoutineCleanup()
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -153,6 +154,7 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 		exclusiveDestinationMapHolder: &atomic.Value{},
 		initMu:                        &sync.Mutex{},
 		jobPartProgress:               jobPartProgressCh,
+		reportCancelCh:                make(chan struct{}, 1),
 		coordinatorChannels: CoordinatorChannels{
 			partsChannel:     partsCh,
 			normalTransferCh: normalTransferCh,
@@ -164,6 +166,8 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 			lowTransferCh:    lowTransferCh,
 			normalChunckCh:   normalChunkCh,
 			lowChunkCh:       lowChunkCh,
+			closeTransferCh:  make(chan struct{}, 100),
+			scheduleCloseCh:  make(chan struct{}, 1),
 		},
 		poolSizingChannels: poolSizingChannels{ // all deliberately unbuffered, because pool sizer routine works in lock-step with these - processing them as they happen, never catching up on populated buffer later
 			entryNotificationCh: make(chan struct{}),
@@ -293,6 +297,10 @@ type jobMgr struct {
 	httpClient *http.Client
 
 	jobPartMgrs jobPartToJobPartMgr // The map of part #s to JobPartMgrs
+
+	// reportCancelCh to close the report thread.
+	reportCancelCh chan struct{}
+
 	// partsDone keep the count of completed part of the Job.
 	partsDone uint32
 	//throughput  common.CountPerSecond // TODO: Set LastCheckedTime to now
@@ -556,7 +564,7 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 
 	for {
 		select {
-		case <-jm.Context().Done():
+		case <-jm.reportCancelCh:
 			fmt.Println("reportJobPartDoneHandler done called")
 			return
 
@@ -690,6 +698,8 @@ type XferChannels struct {
 	lowTransferCh    <-chan IJobPartTransferMgr // Read-only
 	normalChunckCh   chan chunkFunc             // Read-write
 	lowChunkCh       chan chunkFunc             // Read-write
+	closeTransferCh  chan struct{}
+	scheduleCloseCh  chan struct{}
 }
 
 type poolSizingChannels struct {
@@ -745,6 +755,17 @@ func (jm *jobMgr) JobPartsMgrsDelete() {
 		delete(jm.jobPartMgrs.m, k)
 	})
 	fmt.Println("JobPartsMgrs Delete Done")
+}
+
+// TransferRoutineCleanup closes all the Transfer thread.
+// Note: Created the buffer channel so that, if somehow any thread missing(down), it should not stuck.
+func (jm *jobMgr) TransferRoutineCleanup() {
+	jm.reportCancelCh <- struct{}{}
+	jm.xferChannels.scheduleCloseCh <- struct{}{}
+	for cc := 0; cc < jm.concurrency.TransferInitiationPoolSize.Value; cc++ {
+		jm.xferChannels.closeTransferCh <- struct{}{}
+	}
+
 }
 
 // worker that sizes the chunkProcessor pool, dynamically if necessary
@@ -849,7 +870,7 @@ func (jm *jobMgr) scheduleJobParts() {
 	startedPoolSizer := false
 	for {
 		select {
-		case <-jm.Context().Done():
+		case <-jm.xferChannels.scheduleCloseCh:
 			jm.poolSizingChannels.done <- struct{}{}
 			return
 
@@ -921,7 +942,7 @@ func (jm *jobMgr) transferProcessor(workerID int) {
 	for {
 		// No scaleback check here, because this routine runs only in a small number of goroutines, so no need to kill them off
 		select {
-		case <-jm.Context().Done():
+		case <-jm.xferChannels.closeTransferCh:
 			fmt.Println("transferProcessor done called")
 			return
 

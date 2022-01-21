@@ -307,11 +307,13 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
 	jm, found := ja.JobMgr(jobId)
 
 	if found {
+		fmt.Println("JobMgrDone Enter")
 		// Delete the jobMgr from jobIDtoJobMgr map, so that next call will fail.
 		ja.DeleteJob(jobId)
 		fmt.Println("Job Deleted in kv")
 
-		// Call jm.Cancel to signal routines workdone. This will take care on actual cancelling of job too.
+		// Call jm.Cancel to signal routines workdone.
+		// This will take care of any jobPartMgr release.
 		jm.Cancel()
 
 		// Cleanup the JobStatusMgr go routine.
@@ -320,9 +322,13 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
 		// Remove JobPartsMgr from jobPartMgr kv.
 		jm.JobPartsMgrsDelete()
 
-		// Cleanup
+		// Transfer Thread Cleanup.
+		jm.TransferRoutineCleanup()
+
+		// Close chunk status logger.
 		jm.ChunkStatusLoggerCleanup()
 
+		fmt.Println("JobMgrDone Exit")
 		return true
 	} else {
 		return true
