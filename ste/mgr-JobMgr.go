@@ -100,7 +100,6 @@ type IJobMgr interface {
 
 	// Cleanup Functions
 	JobStatusMgrClean()
-	PoolDestroy()
 	JobPartsMgrsDelete()
 	ChunkStatusLoggerCleanup()
 }
@@ -109,8 +108,7 @@ type IJobMgr interface {
 
 func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx context.Context, cpuMon common.CPUMonitor, level common.LogLevel,
 	commandString string, logFileFolder string, tuner ConcurrencyTuner,
-	pacer PacerAdmin, slicePool common.ByteSlicePooler, cacheLimiter common.CacheLimiter, fileCountLimiter common.CacheLimiter,
-	jobLogger common.ILoggerResetable) IJobMgr {
+	pacer PacerAdmin, slicePool common.ByteSlicePooler, cacheLimiter common.CacheLimiter, fileCountLimiter common.CacheLimiter) IJobMgr {
 	const channelSize = 100000
 	// PartsChannelSize defines the number of JobParts which can be placed into the
 	// parts channel. Any JobPart which comes from FE and partChannel is full,
@@ -141,10 +139,9 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	jstm.xferDone = make(chan xferDoneMsg, 1000)
 	jstm.done = make(chan bool, 1)
 	// Different logger for each job.
-	if jobLogger == nil {
-		jobLogger := common.NewJobLogger(jobID, common.ELogLevel.Debug(), logFileFolder, "" /* logFileNameSuffix */)
-		jobLogger.OpenLog()
-	}
+
+	jobLogger := common.NewJobLogger(jobID, common.ELogLevel.Debug(), logFileFolder, "" /* logFileNameSuffix */)
+	jobLogger.OpenLog()
 
 	jm := jobMgr{jobID: jobID, jobPartMgrs: newJobPartToJobPartMgr(), include: map[string]int{}, exclude: map[string]int{},
 		httpClient:                    NewAzcopyHTTPClient(concurrency.MaxIdleConnections),
@@ -173,7 +170,7 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 			exitNotificationCh:  make(chan struct{}),
 			scalebackRequestCh:  make(chan struct{}),
 			requestSlowTuneCh:   make(chan struct{}),
-			done:                make(chan bool),
+			done:                make(chan struct{}, 1),
 		},
 		concurrencyTuner: tuner,
 		pacer:            pacer,
@@ -211,9 +208,6 @@ func (jm *jobMgr) reset(appCtx context.Context, commandString string) IJobMgr {
 	// log the user given command to the job log file.
 	// since the log file is opened in case of resume, list and many other operations
 	// for which commandString passed is empty, the length check is added
-	if appCtx == nil {
-		appCtx = context.Background()
-	}
 	if len(commandString) > 0 {
 		jm.logger.Log(pipeline.LogError, fmt.Sprintf("Job-Command %s", commandString))
 	}
@@ -703,7 +697,7 @@ type poolSizingChannels struct {
 	exitNotificationCh  chan struct{}
 	scalebackRequestCh  chan struct{}
 	requestSlowTuneCh   chan struct{}
-	done                chan bool
+	done                chan struct{}
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -747,21 +741,10 @@ func (jm *jobMgr) QueueJobParts(jpm IJobPartMgr) {
 //JobPartsMgrsDelete remove jobPartMgrs from jobPartToJobPartMgr kv.
 func (jm *jobMgr) JobPartsMgrsDelete() {
 	fmt.Println("JobPartsMgrs Delete")
-	for partNum := common.PartNumber(0); true; partNum++ {
-		_, found := jm.JobPartMgr(partNum)
-		if found {
-			fmt.Println("Deleting ..", partNum)
-			jm.jobPartMgrs.Delete(partNum)
-		} else {
-			break
-		}
-	}
+	jm.jobPartMgrs.Iterate(false, func(k common.PartNumber, v IJobPartMgr) {
+		delete(jm.jobPartMgrs.m, k)
+	})
 	fmt.Println("JobPartsMgrs Delete Done")
-}
-
-// PoolDestroy cleanup the chunk transfer threads pool.
-func (jm *jobMgr) PoolDestroy() {
-	jm.poolSizingChannels.done <- true
 }
 
 // worker that sizes the chunkProcessor pool, dynamically if necessary
@@ -827,7 +810,7 @@ func (jm *jobMgr) poolSizer() {
 			throughputMonitoringInterval = expandedMonitoringInterval
 			slowTuneCh = nil // so we won't keep running this case at the expense of others)
 		case <-time.After(throughputMonitoringInterval):
-			if actualConcurrency == targetConcurrency { // scalebacks can take time. Don't want to do any tuning if actual is not yet aligned to target
+			if targetConcurrency != 0 && actualConcurrency == targetConcurrency { // scalebacks can take time. Don't want to do any tuning if actual is not yet aligned to target
 				bytesOnWire := jm.pacer.GetTotalTraffic()
 				if hasHadTimeToStablize {
 					// throughput has had time to stabilize since last change, so we can meaningfully measure and act on throughput
@@ -866,6 +849,10 @@ func (jm *jobMgr) scheduleJobParts() {
 	startedPoolSizer := false
 	for {
 		select {
+		case <-jm.Context().Done():
+			jm.poolSizingChannels.done <- struct{}{}
+			return
+
 		case jobPart := <-jm.xferChannels.partsChannel:
 
 			if !startedPoolSizer {
@@ -875,9 +862,6 @@ func (jm *jobMgr) scheduleJobParts() {
 				startedPoolSizer = true
 			}
 			jobPart.ScheduleTransfers(jm.Context())
-
-		case <-jm.Context().Done():
-			return
 		}
 	}
 }

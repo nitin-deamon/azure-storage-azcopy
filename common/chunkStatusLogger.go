@@ -257,8 +257,8 @@ type chunkStatusLogger struct {
 	outputEnabled                   bool
 	unsavedEntries                  chan *chunkWaitState
 	flushDone                       chan struct{}
+	done                            chan struct{}
 	cpuMonitor                      CPUMonitor
-	done                            chan bool
 }
 
 func NewChunkStatusLogger(jobID JobID, cpuMon CPUMonitor, logFileFolder string, enableOutput bool) ChunkStatusLoggerCloser {
@@ -267,6 +267,7 @@ func NewChunkStatusLogger(jobID JobID, cpuMon CPUMonitor, logFileFolder string, 
 		outputEnabled:  enableOutput,
 		unsavedEntries: make(chan *chunkWaitState, 1000000),
 		flushDone:      make(chan struct{}),
+		done:           make(chan struct{}, 1),
 		cpuMonitor:     cpuMon,
 	}
 	if enableOutput {
@@ -319,8 +320,9 @@ func (csl *chunkStatusLogger) FlushLog() {
 
 // CloseLogger close the chunklogger thread.
 func (csl *chunkStatusLogger) CloseLogger() {
-	csl.unsavedEntries <- nil
-	csl.done <- true
+	csl.outputEnabled = false
+	csl.done <- struct{}{}
+	close(csl.unsavedEntries)
 }
 
 func (csl *chunkStatusLogger) main(chunkLogPath string) {
@@ -341,22 +343,23 @@ func (csl *chunkStatusLogger) main(chunkLogPath string) {
 
 	alwaysFlushFromNowOn := false
 	for x := range csl.unsavedEntries {
-		select {
-		case <-csl.done:
-			return
-		default:
-			if x == nil {
-				alwaysFlushFromNowOn = true
-				doFlush()
-				csl.flushDone <- struct{}{}
+		if x == nil {
+			alwaysFlushFromNowOn = true
+			doFlush()
+			csl.flushDone <- struct{}{}
+			select {
+			case <-csl.done:
+				return
+			default:
 				continue // TODO can become break (or be moved to later if we close unsaved entries, once we figure out how we got stuff written to us after CloseLog was called)
 			}
-			_, _ = w.WriteString(fmt.Sprintf("%s,%d,%s,%s\n", x.Name, x.OffsetInFile(), x.reason, x.waitStart))
-			if alwaysFlushFromNowOn {
-				// TODO: remove when we figure out how we got stuff written to us after CloseLog was called. For now, this should handle those cases (if they still exist)
-				doFlush()
-			}
 		}
+		_, _ = w.WriteString(fmt.Sprintf("%s,%d,%s,%s\n", x.Name, x.OffsetInFile(), x.reason, x.waitStart))
+		if alwaysFlushFromNowOn {
+			// TODO: remove when we figure out how we got stuff written to us after CloseLog was called. For now, this should handle those cases (if they still exist)
+			doFlush()
+		}
+
 	}
 }
 

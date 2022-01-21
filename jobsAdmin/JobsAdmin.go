@@ -74,7 +74,6 @@ var JobsAdmin interface {
 	// JobMgr returns the specified JobID's JobMgr
 	JobMgr(jobID common.JobID) (ste.IJobMgr, bool)
 	JobMgrEnsureExists(jobID common.JobID, level common.LogLevel, commandString string) ste.IJobMgr
-	JobMgrCreateWithLogger(jobID common.JobID, level common.LogLevel, commandString string) ste.IJobMgr
 
 	// AddJobPartMgr associates the specified JobPartMgr with the Jobs Administrator
 	//AddJobPartMgr(appContext context.Context, planFile JobPartPlanFileName) IJobPartMgr
@@ -295,22 +294,14 @@ func (ja *jobsAdmin) JobMgrEnsureExists(jobID common.JobID,
 	return ja.jobIDToJobMgr.EnsureExists(jobID,
 		func() ste.IJobMgr {
 			// Return existing or new IJobMgr to caller
-			return ste.NewJobMgr(ja.concurrency, jobID, ja.appCtx, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter, ja.JobLogger)
+			return ste.NewJobMgr(ja.concurrency, jobID, ja.appCtx, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter)
 		})
 }
 
-// Same as JobMgrEnsureExists but with addition parameter of user logger.
-func (ja *jobsAdmin) JobMgrCreateWithLogger(jobID common.JobID,
-	level common.LogLevel, commandString string) ste.IJobMgr {
-
-	return ja.jobIDToJobMgr.EnsureExists(jobID,
-		func() ste.IJobMgr {
-			// Return existing or new IJobMgr to caller
-			return ste.NewJobMgr(ja.concurrency, jobID, nil, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter, nil)
-		})
-}
-
-// JobMgrCleanup cleans all goroutine started by jobMgr.
+// JobMgrCleanup cleans up the jobMgr identified by the given jobId. It undoes what NewJobMgr() does, basically it does the following:
+// 1. Stop all go routines started to process this job.
+// 2. Release the memory allocated for this JobMgr instance.
+// Note: this is not thread safe and only one goroutine should call this for a job.
 func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
 	// First thing get the jobMgr.
 	jm, found := ja.JobMgr(jobId)
@@ -326,13 +317,10 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
 		// Cleanup the JobStatusMgr go routine.
 		jm.JobStatusMgrClean()
 
-		// Cleanup the chunk transfer thread pool.
-		jm.PoolDestroy()
-
 		// Remove JobPartsMgr from jobPartMgr kv.
 		jm.JobPartsMgrsDelete()
 
-		// Cleanup chunkStatus logger.
+		// Cleanup
 		jm.ChunkStatusLoggerCleanup()
 
 		return true
