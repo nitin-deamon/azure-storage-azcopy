@@ -898,8 +898,6 @@ func (jm *jobMgr) chunkProcessor(workerID int) {
 		select {
 		case <-jm.poolSizingChannels.scalebackRequestCh:
 			return
-		case <-jm.Context().Done():
-			return
 		default:
 			select {
 			case chunkFunc := <-jm.xferChannels.normalChunckCh:

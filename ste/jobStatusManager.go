@@ -77,8 +77,6 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 
 	for {
 		select {
-		case <-jm.Context().Done():
-			return
 		case msg := <-jstm.partCreated:
 			js.CompleteJobOrdered = js.CompleteJobOrdered || msg.IsFinalPart
 			js.TotalTransfers += msg.TotalTransfers
