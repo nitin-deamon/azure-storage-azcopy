@@ -138,7 +138,7 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	jstm.listReq = make(chan bool)
 	jstm.partCreated = make(chan JobPartCreatedMsg, 100)
 	jstm.xferDone = make(chan xferDoneMsg, 1000)
-	jstm.done = make(chan bool, 1)
+	jstm.done = make(chan struct{}, 1)
 	// Different logger for each job.
 
 	jobLogger := common.NewJobLogger(jobID, common.ELogLevel.Debug(), logFileFolder, "" /* logFileNameSuffix */)
@@ -750,11 +750,11 @@ func (jm *jobMgr) QueueJobParts(jpm IJobPartMgr) {
 
 //JobPartsMgrsDelete remove jobPartMgrs from jobPartToJobPartMgr kv.
 func (jm *jobMgr) JobPartsMgrsDelete() {
-	fmt.Println("JobPartsMgrs Delete")
+	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete enter")
 	jm.jobPartMgrs.Iterate(false, func(k common.PartNumber, v IJobPartMgr) {
 		delete(jm.jobPartMgrs.m, k)
 	})
-	fmt.Println("JobPartsMgrs Delete Done")
+	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete exit")
 }
 
 // TransferRoutineCleanup closes all the Transfer thread.

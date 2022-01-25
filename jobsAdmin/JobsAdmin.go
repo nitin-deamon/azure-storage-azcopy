@@ -302,15 +302,16 @@ func (ja *jobsAdmin) JobMgrEnsureExists(jobID common.JobID,
 // 1. Stop all go routines started to process this job.
 // 2. Release the memory allocated for this JobMgr instance.
 // Note: this is not thread safe and only one goroutine should call this for a job.
-func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
+func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) {
 	// First thing get the jobMgr.
 	jm, found := ja.JobMgr(jobId)
 
 	if found {
-		fmt.Println("JobMgrDone Enter")
+		jm.Log(pipeline.LogInfo, "JobMgrDone Enter")
+
 		// Delete the jobMgr from jobIDtoJobMgr map, so that next call will fail.
 		ja.DeleteJob(jobId)
-		fmt.Println("Job Deleted in kv")
+		jm.Log(pipeline.LogInfo, "Job deleted from jobMgr map")
 
 		// Call jm.Cancel to signal routines workdone.
 		// This will take care of any jobPartMgr release.
@@ -327,11 +328,9 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) bool {
 
 		// Close chunk status logger.
 		jm.ChunkStatusLoggerCleanup()
+		jm.Log(pipeline.LogInfo, "JobMgrDone Exit, Closing the log")
 
-		fmt.Println("JobMgrDone Exit")
-		return true
-	} else {
-		return true
+		jm.CloseLog()
 	}
 }
 

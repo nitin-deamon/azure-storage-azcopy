@@ -267,8 +267,9 @@ func NewChunkStatusLogger(jobID JobID, cpuMon CPUMonitor, logFileFolder string, 
 		outputEnabled:  enableOutput,
 		unsavedEntries: make(chan *chunkWaitState, 1000000),
 		flushDone:      make(chan struct{}),
-		done:           make(chan struct{}, 1),
-		cpuMonitor:     cpuMon,
+		// Signalling channel through which CloseLogger() conveys end-of-logging to the main logger goroutine.
+		done:       make(chan struct{}, 1),
+		cpuMonitor: cpuMon,
 	}
 	if enableOutput {
 		chunkLogPath := path.Join(logFileFolder, jobID.String()+"-chunks.log") // its a CSV, but using log extension for consistency with other files in the directory
@@ -320,8 +321,21 @@ func (csl *chunkStatusLogger) FlushLog() {
 
 // CloseLogger close the chunklogger thread.
 func (csl *chunkStatusLogger) CloseLogger() {
+	// Once logger is closed, we log no more chunks.
 	csl.outputEnabled = false
+
+	// lets make sure no previous entry exist in channel.
+	for {
+		if len(csl.unsavedEntries) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Signal main logger goroutine to packup.
 	csl.done <- struct{}{}
+
+	// No more chunks will ever be written, let the main logger know about this.
 	close(csl.unsavedEntries)
 }
 
@@ -344,13 +358,15 @@ func (csl *chunkStatusLogger) main(chunkLogPath string) {
 	alwaysFlushFromNowOn := false
 	for x := range csl.unsavedEntries {
 		if x == nil {
-			alwaysFlushFromNowOn = true
-			doFlush()
-			csl.flushDone <- struct{}{}
 			select {
+			// If we came here because CloseLogger() was called, there won't be any more chunks to log, end the processing loop.
 			case <-csl.done:
 				return
+
 			default:
+				alwaysFlushFromNowOn = true
+				doFlush()
+				csl.flushDone <- struct{}{}
 				continue // TODO can become break (or be moved to later if we close unsaved entries, once we figure out how we got stuff written to us after CloseLog was called)
 			}
 		}

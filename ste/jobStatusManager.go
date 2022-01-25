@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Azure/azure-pipeline-go/pipeline"
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 )
 
@@ -42,7 +43,7 @@ type jobStatusManager struct {
 	listReq     chan bool
 	partCreated chan JobPartCreatedMsg
 	xferDone    chan xferDoneMsg
-	done        chan bool
+	done        chan struct{}
 }
 
 /* These functions should not fail */
@@ -64,8 +65,8 @@ func (jm *jobMgr) ResurrectSummary(js common.ListJobSummaryResponse) {
 }
 
 func (jm *jobMgr) JobStatusMgrClean() {
-	fmt.Println("Job Status Manager Done Called")
-	jm.jstm.done <- true
+	jm.Log(pipeline.LogInfo, "JobStatusMgrClean called.")
+	jm.jstm.done <- struct{}{}
 }
 
 func (jm *jobMgr) handleStatusUpdateMessage() {
