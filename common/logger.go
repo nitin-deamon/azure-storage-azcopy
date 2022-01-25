@@ -47,6 +47,7 @@ type ILoggerCloser interface {
 type ILoggerResetable interface {
 	OpenLog()
 	MinimumLogLevel() pipeline.LogLevel
+	ChangeLogLevel(pipeline.LogLevel) bool
 	ILoggerCloser
 }
 
@@ -157,6 +158,14 @@ func (jl *jobLogger) ShouldLog(level pipeline.LogLevel) bool {
 		return false
 	}
 	return level <= jl.minimumLevelToLog
+}
+
+func (jl *jobLogger) ChangeLogLevel(level pipeline.LogLevel) bool {
+	if level == pipeline.LogNone {
+		return false
+	}
+	jl.minimumLevelToLog = level
+	return true
 }
 
 func (jl *jobLogger) CloseLog() {

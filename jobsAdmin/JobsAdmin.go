@@ -470,6 +470,16 @@ func (ja *jobsAdmin) LogToJobLog(msg string, level pipeline.LogLevel) {
 	ja.JobLogger.Log(pipeline.LogWarning, prefix+msg) // use LogError here, so that it forces these to get logged, even if user is running at warning level instead of Info.  They won't have "warning" prefix, if Info level was passed in to MessagesForJobLog
 }
 
+func (ja *jobsAdmin) ChangeLogLevel(level pipeline.LogLevel, jobId common.JobID) (bool, error) {
+	jm, found := ja.jobIDToJobMgr.Get(jobId)
+	if !found {
+		err := fmt.Errorf("No JobMgr found with this JobId(%s)", jobId.String())
+		return false, err
+	} else {
+		return jm.ChangeLogLevel(level), nil
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func (ja *jobsAdmin) TryGetPerformanceAdvice(bytesInJob uint64, filesInJob uint32, fromTo common.FromTo, dir common.TransferDirection, p *ste.PipelineNetworkStats) []common.PerformanceAdvice {

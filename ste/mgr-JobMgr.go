@@ -97,14 +97,16 @@ type IJobMgr interface {
 	AddSuccessfulBytesInActiveFiles(n int64)
 	SuccessfulBytesInActiveFiles() uint64
 	CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.CancelPauseResumeResponse
+
+	ChangeLogLevel(pipeline.LogLevel) bool
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx context.Context, cpuMon common.CPUMonitor, level common.LogLevel,
-	       commandString string, logFileFolder string, tuner ConcurrencyTuner,
-	       pacer PacerAdmin, slicePool common.ByteSlicePooler, cacheLimiter common.CacheLimiter, fileCountLimiter common.CacheLimiter,
-	       jobLogger common.ILoggerResetable) IJobMgr {
+	commandString string, logFileFolder string, tuner ConcurrencyTuner,
+	pacer PacerAdmin, slicePool common.ByteSlicePooler, cacheLimiter common.CacheLimiter, fileCountLimiter common.CacheLimiter,
+	jobLogger common.ILoggerResetable) IJobMgr {
 	const channelSize = 100000
 	// PartsChannelSize defines the number of JobParts which can be placed into the
 	// parts channel. Any JobPart which comes from FE and partChannel is full,
@@ -182,11 +184,15 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	for cc := 0; cc < concurrency.TransferInitiationPoolSize.Value; cc++ {
 		go jm.transferProcessor(cc)
 	}
-	
+
 	go jm.reportJobPartDoneHandler()
 	go jm.handleStatusUpdateMessage()
-	
+
 	return &jm
+}
+
+func (jm *jobMgr) ChangeLogLevel(level pipeline.LogLevel) bool {
+	return jm.logger.ChangeLogLevel(level)
 }
 
 func (jm *jobMgr) getOverwritePrompter() *overwritePrompter {
