@@ -761,7 +761,7 @@ func (jptm *jobPartTransferMgr) failActiveTransfer(typ transferErrorCode, descri
 			// display a clear message
 			common.GetLifecycleMgr().Info(fmt.Sprintf("Authentication failed, it is either not correct, or expired, or does not have the correct permission %s", err.Error()))
 			// and use the normal cancelling mechanism so that we can exit in a clean and controlled way
-			jptm.jobPartMgr.(*jobPartMgr).jobMgr.CancelPauseJobOrder(common.EJobStatus.Cancelling())
+			jptm.jobPartMgr.(*jobPartMgr).jobMgr.CancelPauseJobOrder(common.EJobStatus.Failed())
 			// TODO: this results in the final job output line being: Final Job Status: Cancelled
 			//     That's not ideal, because it would be better if it said Final Job Status: Failed
 			//     However, we don't have any way to distinguish "user cancelled after some failed files" from
