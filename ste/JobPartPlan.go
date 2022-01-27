@@ -406,21 +406,20 @@ func (jppt *JobPartPlanTransfer) ErrorCode() int32 {
 
 // ErrorMessage returns the transfer's error message.
 func (jppt *JobPartPlanTransfer) ErrorMessage() string {
-	return string(jppt.errorMessage[:jppt.errorMessageLength])
+	return string(jppt.errorMessage[:atomic.LoadInt32(&jppt.errorMessageLength)])
 }
 
 // SetErrorMessage sets the error message if transfer failed.
 // overWrite flags if set to true overWrites the errorMessage.
 // If overWrite flag is set to false, then errorMessage won't be overwritten.
 func (jppt *JobPartPlanTransfer) SetErrorMessage(errorMessage string, overwrite bool) {
-	if !overwrite {
-		if jppt.errorMessageLength == 0 {
-			jppt.errorMessageLength = int32(len(errorMessage))
+	savedErrorMessageLength := atomic.LoadInt32(&jppt.errorMessageLength)
+
+	// Overwrite, if this is the first error or caller wants this new errorMessage to overwrite the existing one.
+	if (savedErrorMessageLength == 0) || overwrite {
+		if atomic.CompareAndSwapInt32(&jppt.errorMessageLength, savedErrorMessageLength, int32(len(errorMessage))) {
 			copy(jppt.errorMessage[:], []byte(errorMessage))
 		}
-	} else {
-		jppt.errorMessageLength = int32(len(errorMessage))
-		copy(jppt.errorMessage[:], []byte(errorMessage))
 	}
 }
 

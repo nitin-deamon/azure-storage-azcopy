@@ -44,7 +44,7 @@ type IJobPartTransferMgr interface {
 	TransferStatusIgnoringCancellation() common.TransferStatus
 	SetStatus(status common.TransferStatus)
 	SetErrorCode(errorCode int32)
-	SetErrorMessage(ErrorMessage string)
+	SetErrorMessage(errorMessage string)
 	SetNumberOfChunks(numChunks uint32)
 	SetActionAfterLastChunk(f func())
 	ReportTransferDone() uint32
@@ -588,9 +588,8 @@ func (jptm *jobPartTransferMgr) ErrorMessage() string {
 }
 
 // ErrorMessage updates the error message of transfer for given job.
-func (jptm *jobPartTransferMgr) SetErrorMessage(ErrorMessage string) {
-
-	jptm.jobPartPlanTransfer.SetErrorMessage(ErrorMessage, false)
+func (jptm *jobPartTransferMgr) SetErrorMessage(errorMessage string) {
+	jptm.jobPartPlanTransfer.SetErrorMessage(errorMessage, false)
 }
 
 // TODO: Can we kill this method?
