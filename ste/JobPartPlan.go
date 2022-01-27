@@ -414,11 +414,17 @@ func (jppt *JobPartPlanTransfer) ErrorMessage() string {
 // If overWrite flag is set to false, then errorMessage won't be overwritten.
 func (jppt *JobPartPlanTransfer) SetErrorMessage(errorMessage string, overwrite bool) {
 	savedErrorMessageLength := atomic.LoadInt32(&jppt.errorMessageLength)
+	currentErrorMessageLength := int32(len(errorMessage))
+
+	// Make sure error message does not exceed max length.
+	if currentErrorMessageLength > MaxErrorMessageLength {
+		currentErrorMessageLength = MaxErrorMessageLength
+	}
 
 	// Overwrite, if this is the first error or caller wants this new errorMessage to overwrite the existing one.
 	if (savedErrorMessageLength == 0) || overwrite {
-		if atomic.CompareAndSwapInt32(&jppt.errorMessageLength, savedErrorMessageLength, int32(len(errorMessage))) {
-			copy(jppt.errorMessage[:], []byte(errorMessage))
+		if atomic.CompareAndSwapInt32(&jppt.errorMessageLength, savedErrorMessageLength, currentErrorMessageLength) {
+			copy(jppt.errorMessage[:], []byte(errorMessage[:currentErrorMessageLength]))
 		}
 	}
 }
