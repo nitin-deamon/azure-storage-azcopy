@@ -64,8 +64,8 @@ func (jm *jobMgr) ResurrectSummary(js common.ListJobSummaryResponse) {
 	jm.jstm.js = js
 }
 
-func (jm *jobMgr) JobStatusMgrClean() {
-	jm.Log(pipeline.LogInfo, "JobStatusMgrClean called.")
+func (jm *jobMgr) CleanupJobStatusMgr() {
+	jm.Log(pipeline.LogInfo, "CleanJobStatusMgr called.")
 	jm.jstm.done <- struct{}{}
 }
 

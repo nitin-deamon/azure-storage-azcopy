@@ -311,26 +311,11 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) {
 
 		// Delete the jobMgr from jobIDtoJobMgr map, so that next call will fail.
 		ja.DeleteJob(jobId)
+
 		jm.Log(pipeline.LogInfo, "Job deleted from jobMgr map")
 
-		// Call jm.Cancel to signal routines workdone.
-		// This will take care of any jobPartMgr release.
-		jm.Cancel()
-
-		// Cleanup the JobStatusMgr go routine.
-		jm.JobStatusMgrClean()
-
-		// Remove JobPartsMgr from jobPartMgr kv.
-		jm.JobPartsMgrsDelete()
-
-		// Transfer Thread Cleanup.
-		jm.TransferRoutineCleanup()
-
-		// Close chunk status logger.
-		jm.ChunkStatusLoggerCleanup()
-		jm.Log(pipeline.LogInfo, "JobMgrDone Exit, Closing the log")
-
-		jm.CloseLog()
+		// Rest of jobMgr related cleanup done by DeferredCleanupJobMgr function.
+		go jm.DeferredCleanupJobMgr()
 	}
 }
 

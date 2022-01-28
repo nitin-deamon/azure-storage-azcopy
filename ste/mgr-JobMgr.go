@@ -99,10 +99,8 @@ type IJobMgr interface {
 	CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.CancelPauseResumeResponse
 
 	// Cleanup Functions
-	JobStatusMgrClean()
-	JobPartsMgrsDelete()
-	ChunkStatusLoggerCleanup()
-	TransferRoutineCleanup()
+	DeferredCleanupJobMgr()
+	CleanupJobStatusMgr()
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -650,11 +648,39 @@ func (jm *jobMgr) CloseLog() {
 	jm.chunkStatusLogger.FlushLog()
 }
 
+// DeferredCleanupJobMgr cleanup all the jobMgr resources.
+// TODO: Still JobMgr memory not garbage collected.
+func (jm *jobMgr) DeferredCleanupJobMgr() {
+
+	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr called")
+
+	time.Sleep(60 * time.Second)
+
+	// Call jm.Cancel to signal routines workdone.
+	// This will take care of any jobPartMgr release.
+	jm.Cancel()
+
+	// Cleanup the JobStatusMgr go routine.
+	jm.CleanupJobStatusMgr()
+
+	// Remove JobPartsMgr from jobPartMgr kv.
+	jm.deleteJobPartsMgrs()
+
+	// Transfer Thread Cleanup.
+	jm.cleanupTransferRoutine()
+
+	// Close chunk status logger.
+	jm.cleanupChunkStatusLogger()
+	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr Exit, Closing the log")
+
+	jm.CloseLog()
+}
+
 func (jm *jobMgr) ChunkStatusLogger() common.ChunkStatusLogger {
 	return jm.chunkStatusLogger
 }
 
-func (jm *jobMgr) ChunkStatusLoggerCleanup() {
+func (jm *jobMgr) cleanupChunkStatusLogger() {
 	jm.chunkStatusLogger.FlushLog()
 	jm.chunkStatusLogger.CloseLogger()
 }
@@ -748,8 +774,8 @@ func (jm *jobMgr) QueueJobParts(jpm IJobPartMgr) {
 	jm.coordinatorChannels.partsChannel <- jpm
 }
 
-//JobPartsMgrsDelete remove jobPartMgrs from jobPartToJobPartMgr kv.
-func (jm *jobMgr) JobPartsMgrsDelete() {
+// deleteJobPartsMgrs remove jobPartMgrs from jobPartToJobPartMgr kv.
+func (jm *jobMgr) deleteJobPartsMgrs() {
 	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete enter")
 	jm.jobPartMgrs.Iterate(false, func(k common.PartNumber, v IJobPartMgr) {
 		delete(jm.jobPartMgrs.m, k)
@@ -757,15 +783,14 @@ func (jm *jobMgr) JobPartsMgrsDelete() {
 	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete exit")
 }
 
-// TransferRoutineCleanup closes all the Transfer thread.
+// cleanupTransferRoutine closes all the Transfer thread.
 // Note: Created the buffer channel so that, if somehow any thread missing(down), it should not stuck.
-func (jm *jobMgr) TransferRoutineCleanup() {
+func (jm *jobMgr) cleanupTransferRoutine() {
 	jm.reportCancelCh <- struct{}{}
 	jm.xferChannels.scheduleCloseCh <- struct{}{}
 	for cc := 0; cc < jm.concurrency.TransferInitiationPoolSize.Value; cc++ {
 		jm.xferChannels.closeTransferCh <- struct{}{}
 	}
-
 }
 
 // worker that sizes the chunkProcessor pool, dynamically if necessary
