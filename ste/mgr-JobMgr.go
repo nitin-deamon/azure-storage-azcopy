@@ -98,7 +98,7 @@ type IJobMgr interface {
 	SuccessfulBytesInActiveFiles() uint64
 	CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.CancelPauseResumeResponse
 
-	ChangeLogLevel(pipeline.LogLevel) bool
+	ChangeLogLevel(pipeline.LogLevel)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -127,7 +127,7 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 
 	// atomicAllTransfersScheduled is set to 1 since this api is also called when new job part is ordered.
 	enableChunkLogOutput := level.ToPipelineLogLevel() == pipeline.LogDebug
-	
+
 	/* Create book-keeping channels */
 	jobPartProgressCh := make(chan jobPartProgressInfo)
 	var jstm jobStatusManager
@@ -191,8 +191,10 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	return &jm
 }
 
-func (jm *jobMgr) ChangeLogLevel(level pipeline.LogLevel) bool {
-	return jm.logger.ChangeLogLevel(level)
+func (jm *jobMgr) ChangeLogLevel(level pipeline.LogLevel) {
+	if jm.logger != nil {
+		jm.logger.ChangeLogLevel(level)
+	}
 }
 
 func (jm *jobMgr) getOverwritePrompter() *overwritePrompter {
