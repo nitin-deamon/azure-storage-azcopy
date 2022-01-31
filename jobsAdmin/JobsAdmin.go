@@ -314,7 +314,15 @@ func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) {
 
 		jm.Log(pipeline.LogInfo, "Job deleted from jobMgr map")
 
-		// Rest of jobMgr related cleanup done by DeferredCleanupJobMgr function.
+		/*
+		 * Rest of jobMgr related cleanup done by DeferredCleanupJobMgr function.
+		 * Now that we have removed the jobMgr from the map, no new caller will find it and hence cannot start any
+		 * new activity using the jobMgr. We cleanup the resources of the jobMgr in a deferred manner as a safety net
+		 * to allow processing any messages that may be in transit.
+		 *
+		 * NOTE: This is not really required but we don't want to miss any in-transit messages as some of the TODOs in
+		 * 		 the code suggest.
+		 */
 		go jm.DeferredCleanupJobMgr()
 	}
 }

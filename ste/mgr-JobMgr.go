@@ -649,12 +649,21 @@ func (jm *jobMgr) CloseLog() {
 }
 
 // DeferredCleanupJobMgr cleanup all the jobMgr resources.
-// TODO: Still JobMgr memory not garbage collected.
+// Warning: DeferredCleanupJobMgr should be called from JobMgrCleanup().
+//          As this function neither threadsafe nor idempotient. So if DeferredCleanupJobMgr called
+//          mulitple times, it may stuck as receiving channel already closed. Where as JobMgrCleanup()
+//          safe in that sense it will do the cleanup only once.
+//
+// TODO: Add JobsAdmin reference to each JobMgr so that in any circumstances JobsAdmin should not freed,
+//       while jobMgr running. Whereas JobsAdmin store number JobMgr running  at any time.
+//       At that point DeferredCleanupJobMgr() will delete jobMgr from jobsAdmin map.
 func (jm *jobMgr) DeferredCleanupJobMgr() {
 
 	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr called")
 
 	time.Sleep(60 * time.Second)
+
+	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr out of sleep")
 
 	// Call jm.Cancel to signal routines workdone.
 	// This will take care of any jobPartMgr release.

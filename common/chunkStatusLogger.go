@@ -321,7 +321,10 @@ func (csl *chunkStatusLogger) CloseLogger() {
 	// Once logger is closed, we log no more chunks.
 	csl.outputEnabled = false
 
-	// No more chunks will ever be written, let the main logger know about this.
+	/*
+	 * No more chunks will ever be written, let the main logger know about this.
+	 * On closing this channel the main logger will exit from its for-range loop.
+	 */
 	close(csl.unsavedEntries)
 }
 
@@ -342,6 +345,8 @@ func (csl *chunkStatusLogger) main(chunkLogPath string) {
 	defer doFlush()
 
 	alwaysFlushFromNowOn := false
+
+	// We will exit the following for-range loop after CloseLogger() closes the csl.unsavedEntries channel.
 	for x := range csl.unsavedEntries {
 		if x == nil {
 			alwaysFlushFromNowOn = true
