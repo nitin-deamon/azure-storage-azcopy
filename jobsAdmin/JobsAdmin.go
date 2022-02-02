@@ -73,8 +73,11 @@ var JobsAdmin interface {
 
 	// JobMgr returns the specified JobID's JobMgr
 	JobMgr(jobID common.JobID) (ste.IJobMgr, bool)
+
 	JobMgrEnsureExists(jobID common.JobID, level common.LogLevel, commandString string) ste.IJobMgr
-	JobMgrCreateWithLogger(jobID common.JobID, level common.LogLevel, commandString string, logger common.ILoggerResetable) ste.IJobMgr
+
+	// JobMgrCleanUp do the JobMgr cleanup.
+	JobMgrCleanUp(jobId common.JobID)
 
 	// AddJobPartMgr associates the specified JobPartMgr with the Jobs Administrator
 	//AddJobPartMgr(appContext context.Context, planFile JobPartPlanFileName) IJobPartMgr
@@ -295,19 +298,37 @@ func (ja *jobsAdmin) JobMgrEnsureExists(jobID common.JobID,
 	return ja.jobIDToJobMgr.EnsureExists(jobID,
 		func() ste.IJobMgr {
 			// Return existing or new IJobMgr to caller
-			return ste.NewJobMgr(ja.concurrency, jobID, ja.appCtx, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter, ja.JobLogger)
+			return ste.NewJobMgr(ja.concurrency, jobID, ja.appCtx, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter)
 		})
 }
 
-// Same as JobMgrEnsureExists but with addition parameter of user logger.
-func (ja *jobsAdmin) JobMgrCreateWithLogger(jobID common.JobID,
-	level common.LogLevel, commandString string, logger common.ILoggerResetable) ste.IJobMgr {
+// JobMgrCleanup cleans up the jobMgr identified by the given jobId. It undoes what NewJobMgr() does, basically it does the following:
+// 1. Stop all go routines started to process this job.
+// 2. Release the memory allocated for this JobMgr instance.
+// Note: this is not thread safe and only one goroutine should call this for a job.
+func (ja *jobsAdmin) JobMgrCleanUp(jobId common.JobID) {
+	// First thing get the jobMgr.
+	jm, found := ja.JobMgr(jobId)
 
-	return ja.jobIDToJobMgr.EnsureExists(jobID,
-		func() ste.IJobMgr {
-			// Return existing or new IJobMgr to caller
-			return ste.NewJobMgr(ja.concurrency, jobID, ja.appCtx, ja.cpuMonitor, level, commandString, ja.logDir, ja.concurrencyTuner, ja.pacer, ja.slicePool, ja.cacheLimiter, ja.fileCountLimiter, logger)
-		})
+	if found {
+		jm.Log(pipeline.LogInfo, "JobMgrDone Enter")
+
+		// Delete the jobMgr from jobIDtoJobMgr map, so that next call will fail.
+		ja.DeleteJob(jobId)
+
+		jm.Log(pipeline.LogInfo, "Job deleted from jobMgr map")
+
+		/*
+		 * Rest of jobMgr related cleanup done by DeferredCleanupJobMgr function.
+		 * Now that we have removed the jobMgr from the map, no new caller will find it and hence cannot start any
+		 * new activity using the jobMgr. We cleanup the resources of the jobMgr in a deferred manner as a safety net
+		 * to allow processing any messages that may be in transit.
+		 *
+		 * NOTE: This is not really required but we don't want to miss any in-transit messages as some of the TODOs in
+		 * 		 the code suggest.
+		 */
+		go jm.DeferredCleanupJobMgr()
+	}
 }
 
 func (ja *jobsAdmin) BytesOverWire() int64 {
@@ -330,12 +351,12 @@ func (ja *jobsAdmin) SuccessfulBytesInActiveFiles() uint64 {
 
 func (ja *jobsAdmin) ResurrectJob(jobId common.JobID, sourceSAS string, destinationSAS string) bool {
 	// Search the existing plan files for the PartPlans for the given jobId
-	// only the files which have JobId has prefix and DataSchemaVersion as Suffix
+	// only the files which are not empty and have JobId has prefix and DataSchemaVersion as Suffix
 	// are include in the result
 	files := func(prefix, ext string) []os.FileInfo {
 		var files []os.FileInfo
 		filepath.Walk(ja.planDir, func(path string, fileInfo os.FileInfo, _ error) error {
-			if !fileInfo.IsDir() && strings.HasPrefix(fileInfo.Name(), prefix) && strings.HasSuffix(fileInfo.Name(), ext) {
+			if !fileInfo.IsDir() && fileInfo.Size() != 0 && strings.HasPrefix(fileInfo.Name(), prefix) && strings.HasSuffix(fileInfo.Name(), ext) {
 				files = append(files, fileInfo)
 			}
 			return nil
@@ -372,7 +393,7 @@ func (ja *jobsAdmin) ResurrectJobParts() {
 	files := func(ext string) []os.FileInfo {
 		var files []os.FileInfo
 		filepath.Walk(ja.planDir, func(path string, fileInfo os.FileInfo, _ error) error {
-			if !fileInfo.IsDir() && strings.HasSuffix(fileInfo.Name(), ext) {
+			if !fileInfo.IsDir() && fileInfo.Size() != 0 && strings.HasSuffix(fileInfo.Name(), ext) {
 				files = append(files, fileInfo)
 			}
 			return nil
