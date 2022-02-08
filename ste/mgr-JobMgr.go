@@ -583,7 +583,7 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 			} else {
 				jm.Log(pipeline.LogError, "part0Plan of job invalid")
 			}
-			fmt.Printf("reportJobPartDoneHandler done called for Job(%s)\n", jm.jobID.String())
+			jm.Log(pipeline.LogInfo, "reportJobPartDoneHandler done called")
 			return
 
 		case partProgressInfo := <-jm.jobPartProgress:
@@ -677,7 +677,6 @@ func (jm *jobMgr) CloseLog() {
 //       while jobMgr running. Whereas JobsAdmin store number JobMgr running  at any time.
 //       At that point DeferredCleanupJobMgr() will delete jobMgr from jobsAdmin map.
 func (jm *jobMgr) DeferredCleanupJobMgr() {
-
 	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr called")
 
 	time.Sleep(60 * time.Second)
@@ -700,6 +699,9 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 	// Close chunk status logger.
 	jm.cleanupChunkStatusLogger()
 	jm.Log(pipeline.LogInfo, "DeferredCleanupJobMgr Exit, Closing the log")
+
+	// Sleep for sometime so that all go routine done with cleanUp and log the progress in job log.
+	time.Sleep(60 * time.Second)
 
 	jm.CloseLog()
 }
@@ -862,7 +864,7 @@ func (jm *jobMgr) poolSizer() {
 			hasHadTimeToStablize = false
 			jm.poolSizingChannels.scalebackRequestCh <- struct{}{}
 		} else if actualConcurrency == 0 && targetConcurrency == 0 {
-			fmt.Println("Exiting Pool sizer")
+			jm.Log(pipeline.LogInfo, "Exits Pool sizer")
 			return
 		}
 
@@ -924,6 +926,7 @@ func (jm *jobMgr) scheduleJobParts() {
 	for {
 		select {
 		case <-jm.xferChannels.scheduleCloseCh:
+			jm.Log(pipeline.LogInfo, "ScheduleJobParts done called")
 			jm.poolSizingChannels.done <- struct{}{}
 			return
 
@@ -994,7 +997,7 @@ func (jm *jobMgr) transferProcessor(workerID int) {
 		// No scaleback check here, because this routine runs only in a small number of goroutines, so no need to kill them off
 		select {
 		case <-jm.xferChannels.closeTransferCh:
-			fmt.Println("transferProcessor done called")
+			jm.Log(pipeline.LogInfo, "transferProcessor done called")
 			return
 
 		case jptm := <-jm.xferChannels.normalTransferCh:
