@@ -571,21 +571,18 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 
 	for {
 		select {
-		case _, ok := <-jm.reportCancelCh:
-			if ok {
-				jm.Panic(fmt.Errorf("Received message on reportCancelCh instead of close signal"))
-			}
+		case <-jm.reportCancelCh:
 			jpm, ok := jm.jobPartMgrs.Get(0)
 			if ok {
 				plan := jpm.Plan()
 				if plan.JobStatus() == common.EJobStatus.InProgress() ||
 					plan.JobStatus() == common.EJobStatus.Cancelling() {
-					jm.Panic(fmt.Errorf("reportCancelCh received close, job still in progress"))
+					jm.Panic(fmt.Errorf("reportCancelCh received close, job(%s) still in state: %s", jm.jobID.String(), plan.JobStatus()))
 				}
 			} else {
 				jm.Log(pipeline.LogError, "Part(0) of job invalid")
 			}
-			fmt.Println("reportJobPartDoneHandler done called")
+			fmt.Printf("reportJobPartDoneHandler done called for job(%s)\n", jm.jobID.String())
 			return
 
 		case partProgressInfo := <-jm.jobPartProgress:
@@ -816,7 +813,7 @@ func (jm *jobMgr) deleteJobPartsMgrs() {
 // cleanupTransferRoutine closes all the Transfer thread.
 // Note: Created the buffer channel so that, if somehow any thread missing(down), it should not stuck.
 func (jm *jobMgr) cleanupTransferRoutine() {
-	close(jm.reportCancelCh)
+	jm.reportCancelCh <- struct{}{}
 	jm.xferChannels.scheduleCloseCh <- struct{}{}
 	for cc := 0; cc < jm.concurrency.TransferInitiationPoolSize.Value; cc++ {
 		jm.xferChannels.closeTransferCh <- struct{}{}
