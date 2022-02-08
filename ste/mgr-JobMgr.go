@@ -572,17 +572,18 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 	for {
 		select {
 		case <-jm.reportCancelCh:
-			jpm, ok := jm.jobPartMgrs.Get(0)
+			jobPart0Mgr, ok := jm.jobPartMgrs.Get(0)
 			if ok {
-				plan := jpm.Plan()
-				if plan.JobStatus() == common.EJobStatus.InProgress() ||
-					plan.JobStatus() == common.EJobStatus.Cancelling() {
-					jm.Panic(fmt.Errorf("reportCancelCh received close, job(%s) still in state: %s", jm.jobID.String(), plan.JobStatus()))
+				part0plan := jobPart0Mgr.Plan()
+				if part0plan.JobStatus() == common.EJobStatus.InProgress() ||
+					part0plan.JobStatus() == common.EJobStatus.Cancelling() {
+					jm.Panic(fmt.Errorf("reportCancelCh received cancel event while job still not completed, Job(%s) in state: %s",
+						jm.jobID.String(), part0plan.JobStatus()))
 				}
 			} else {
-				jm.Log(pipeline.LogError, "Part(0) of job invalid")
+				jm.Log(pipeline.LogError, "part0Plan of job invalid")
 			}
-			fmt.Printf("reportJobPartDoneHandler done called for job(%s)\n", jm.jobID.String())
+			fmt.Printf("reportJobPartDoneHandler done called for Job(%s)\n", jm.jobID.String())
 			return
 
 		case partProgressInfo := <-jm.jobPartProgress:
