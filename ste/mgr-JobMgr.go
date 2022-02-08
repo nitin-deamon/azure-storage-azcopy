@@ -575,9 +575,8 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 			fmt.Println("reportJobPartDoneHandler done called")
 			return
 
-		default:
+		case partProgressInfo := <-jm.jobPartProgress:
 
-			partProgressInfo := <-jm.jobPartProgress
 			jobPart0Mgr, ok := jm.jobPartMgrs.Get(0)
 			if !ok {
 				jm.Panic(fmt.Errorf("Failed to find Job %v, Part #0", jm.jobID))
