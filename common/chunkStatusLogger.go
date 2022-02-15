@@ -326,6 +326,9 @@ func (csl *chunkStatusLogger) CloseLogger() {
 	 * On closing this channel the main logger will exit from its for-range loop.
 	 */
 	close(csl.unsavedEntries)
+
+	// Set address to nil so that GC will reclaim.
+	csl.unsavedEntries = nil
 }
 
 func (csl *chunkStatusLogger) main(chunkLogPath string) {

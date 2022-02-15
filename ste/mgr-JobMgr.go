@@ -98,12 +98,10 @@ type IJobMgr interface {
 	SuccessfulBytesInActiveFiles() uint64
 	CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.CancelPauseResumeResponse
 
-
 	ChangeLogLevel(pipeline.LogLevel)
 	// Cleanup Functions
 	DeferredCleanupJobMgr()
 	CleanupJobStatusMgr()
-
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -703,7 +701,23 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 	// Sleep for sometime so that all go routine done with cleanUp and log the progress in job log.
 	time.Sleep(60 * time.Second)
 
-	jm.CloseLog()
+	// Release the allocated memory
+	jm.freeJobMgrMemory()
+
+	jm.logger.CloseLog()
+}
+
+// freeJobMgrMemory frees the memory by setting nil to addresses, so that gc reclaim it in next cycle.
+func (jm *jobMgr) freeJobMgrMemory() {
+	jm.chunkStatusLogger = nil
+	jm.xferChannels.normalTransferCh = nil
+	jm.xferChannels.lowTransferCh = nil
+	jm.xferChannels.lowChunkCh = nil
+	jm.xferChannels.normalChunckCh = nil
+	jm.coordinatorChannels.lowTransferCh = nil
+	jm.coordinatorChannels.normalTransferCh = nil
+	jm.coordinatorChannels.partsChannel = nil
+	jm.xferChannels.partsChannel = nil
 }
 
 func (jm *jobMgr) ChunkStatusLogger() common.ChunkStatusLogger {
@@ -808,6 +822,7 @@ func (jm *jobMgr) QueueJobParts(jpm IJobPartMgr) {
 func (jm *jobMgr) deleteJobPartsMgrs() {
 	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete enter")
 	jm.jobPartMgrs.Iterate(false, func(k common.PartNumber, v IJobPartMgr) {
+		v.Close()
 		delete(jm.jobPartMgrs.m, k)
 	})
 	jm.Log(pipeline.LogInfo, "JobPartsMgrsDelete exit")
