@@ -309,6 +309,7 @@ type TransferDetail struct {
 	TransferSize       uint64
 	ErrorCode          int32  `json:",string"`
 	ErrorMessage       string `json:",string"`
+	JobStatus          uint32 `json:",string"`
 }
 
 type CancelPauseResumeResponse struct {

@@ -98,12 +98,12 @@ type IJobMgr interface {
 	SuccessfulBytesInActiveFiles() uint64
 	CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.CancelPauseResumeResponse
 
-
 	ChangeLogLevel(pipeline.LogLevel)
 	// Cleanup Functions
 	DeferredCleanupJobMgr()
 	CleanupJobStatusMgr()
 
+	SetJobStatus(common.JobStatus)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -140,6 +140,8 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	jstm.partCreated = make(chan JobPartCreatedMsg, 100)
 	jstm.xferDone = make(chan xferDoneMsg, 1000)
 	jstm.done = make(chan struct{}, 1)
+	// Set in-memory Job Status to InProgress.
+	jstm.js.JobStatus = common.EJobStatus.InProgress()
 	// Different logger for each job.
 
 	jobLogger := common.NewJobLogger(jobID, common.ELogLevel.Debug(), logFileFolder, "" /* logFileNameSuffix */)
@@ -616,12 +618,12 @@ func (jm *jobMgr) reportJobPartDoneHandler() {
 
 				switch part0Plan.JobStatus() {
 				case common.EJobStatus.Cancelling():
-					part0Plan.SetJobStatus(common.EJobStatus.Cancelled())
+					jm.SetJobStatus(common.EJobStatus.Cancelled())
 					if shouldLog {
 						jm.Log(pipeline.LogInfo, fmt.Sprintf("%s %v successfully cancelled", partDescription, jm.jobID))
 					}
 				case common.EJobStatus.InProgress():
-					part0Plan.SetJobStatus((common.EJobStatus).EnhanceJobStatusInfo(jobProgressInfo.transfersSkipped > 0,
+					jm.SetJobStatus((common.EJobStatus).EnhanceJobStatusInfo(jobProgressInfo.transfersSkipped > 0,
 						jobProgressInfo.transfersFailed > 0,
 						jobProgressInfo.transfersCompleted > 0))
 				}
@@ -713,6 +715,20 @@ func (jm *jobMgr) ChunkStatusLogger() common.ChunkStatusLogger {
 func (jm *jobMgr) cleanupChunkStatusLogger() {
 	jm.chunkStatusLogger.FlushLog()
 	jm.chunkStatusLogger.CloseLogger()
+}
+
+func (jm *jobMgr) SetJobStatus(desiredStatus common.JobStatus) {
+	// Search for the Part 0 of the Job,since the Part 0 status concludes the actual status of the job.
+	jpm, found := jm.JobPartMgr(0)
+	if !found {
+
+	}
+	jpp0 := jpm.Plan()
+	jm.SendXferDoneMsg(xferDoneMsg{
+		TransferStatus: common.ETransferStatus.JobComplete(),
+		JobStatus:      uint32(desiredStatus),
+	})
+	jpp0.SetJobStatus(desiredStatus)
 }
 
 // TODO: find a better way for JobsAdmin to log (it doesn't have direct access to the job log, because it was originally designed to support multiple jobs
@@ -1077,7 +1093,7 @@ func (jm *jobMgr) CancelPauseJobOrder(desiredJobStatus common.JobStatus) common.
 		// Job immediately stop.
 		fallthrough
 	case common.EJobStatus.Paused(): // Logically, It's OK to pause an already-paused job
-		jpp0.SetJobStatus(desiredJobStatus)
+		jm.SetJobStatus(desiredJobStatus)
 		msg := fmt.Sprintf("JobID=%v %s", jobID,
 			common.IffString(desiredJobStatus == common.EJobStatus.Paused(), "paused", "canceled"))
 

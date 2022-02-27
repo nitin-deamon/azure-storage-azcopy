@@ -90,19 +90,32 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 			msg.Src = common.URLStringExtension(msg.Src).RedactSecretQueryParamForLogging()
 			msg.Dst = common.URLStringExtension(msg.Dst).RedactSecretQueryParamForLogging()
 
-			switch msg.TransferStatus {
-			case common.ETransferStatus.Success():
-				js.TransfersCompleted++
-				js.TotalBytesTransferred += msg.TransferSize
-			case common.ETransferStatus.Failed(),
-				common.ETransferStatus.TierAvailabilityCheckFailure(),
-				common.ETransferStatus.BlobTierFailure():
-				js.TransfersFailed++
-				js.FailedTransfers = append(js.FailedTransfers, msg)
-			case common.ETransferStatus.SkippedEntityAlreadyExists(),
-				common.ETransferStatus.SkippedBlobHasSnapshots():
-				js.TransfersSkipped++
-				js.SkippedTransfers = append(js.SkippedTransfers, msg)
+			if msg.TransferStatus == common.ETransferStatus.JobComplete() {
+				if js.JobStatus == common.EJobStatus.InProgress() ||
+					js.JobStatus == common.EJobStatus.Cancelling() {
+					js.JobStatus = common.JobStatus(msg.JobStatus)
+				} else {
+					err := fmt.Errorf("Job already in state(%s) , Still received another JobComplete message", js.JobStatus)
+					jm.Panic(err)
+				}
+			} else {
+				if js.JobStatus != common.EJobStatus.InProgress() {
+					jm.Log(pipeline.LogError, "Recieved Out of order Messages")
+				}
+				switch msg.TransferStatus {
+				case common.ETransferStatus.Success():
+					js.TransfersCompleted++
+					js.TotalBytesTransferred += msg.TransferSize
+				case common.ETransferStatus.Failed(),
+					common.ETransferStatus.TierAvailabilityCheckFailure(),
+					common.ETransferStatus.BlobTierFailure():
+					js.TransfersFailed++
+					js.FailedTransfers = append(js.FailedTransfers, msg)
+				case common.ETransferStatus.SkippedEntityAlreadyExists(),
+					common.ETransferStatus.SkippedBlobHasSnapshots():
+					js.TransfersSkipped++
+					js.SkippedTransfers = append(js.SkippedTransfers, msg)
+				}
 			}
 
 		case <-jstm.listReq:

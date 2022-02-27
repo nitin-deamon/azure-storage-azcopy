@@ -14,14 +14,15 @@ import (
 	"time"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/azbfs"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/Azure/azure-storage-file-go/azfile"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/azbfs"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"golang.org/x/sync/semaphore"
 )
 
 var _ IJobPartMgr = &jobPartMgr{}
+
 // debug knob
 var DebugSkipFiles = make(map[string]bool)
 
@@ -332,7 +333,7 @@ func (jpm *jobPartMgr) ScheduleTransfers(jobCtx context.Context) {
 	plan := jpm.planMMF.Plan()
 	if plan.PartNum == 0 && plan.NumTransfers == 0 {
 		/* This will wind down the transfer and report summary */
-		plan.SetJobStatus(common.EJobStatus.Completed())
+		jpm.jobMgr.SetJobStatus(common.EJobStatus.Completed())
 		return
 	}
 

@@ -641,6 +641,9 @@ func (TransferStatus) Success() TransferStatus { return TransferStatus(2) }
 // Folder was created, but properties have not been persisted yet. Equivalent to Started, but never intended to be set on anything BUT folders.
 func (TransferStatus) FolderCreated() TransferStatus { return TransferStatus(3) }
 
+// Job complete, This is used to tell jobStatus Manager about job complete.
+func (TransferStatus) JobComplete() TransferStatus { return TransferStatus(4) }
+
 // Transfer failed due to some error.
 func (TransferStatus) Failed() TransferStatus { return TransferStatus(-1) }
 
