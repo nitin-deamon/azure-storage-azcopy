@@ -412,6 +412,13 @@ func (cr *singleChunkReader) Close() error {
 	// do the real work
 	cr.closeBuffer()
 	cr.isClosed = true
+
+	/*
+	 * Set chunkLogger to nil, so that chunkStatusLogger be GCed. Need to revisit this as
+	 * should not required to set nil. But we are seeing this never chunkstatus logger memory not freed.
+	 * It might be reference of cr held by someone.
+	 */
+	cr.chunkLogger = nil
 	return nil
 }
 

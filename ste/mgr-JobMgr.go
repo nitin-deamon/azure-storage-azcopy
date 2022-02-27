@@ -701,8 +701,11 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 	// Sleep for sometime so that all go routine done with cleanUp and log the progress in job log.
 	time.Sleep(60 * time.Second)
 
-	// Release the allocated memory
-	jm.freeJobMgrMemory()
+	/*
+	 * Release the allocated memory, For the time being commenting this code.
+	 * As seeing GC able to cleanup memory without these changes.
+	 */
+	// jm.freeJobMgrMemory()
 
 	jm.logger.CloseLog()
 }

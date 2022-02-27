@@ -14,14 +14,15 @@ import (
 	"time"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/azbfs"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/Azure/azure-storage-file-go/azfile"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/azbfs"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"golang.org/x/sync/semaphore"
 )
 
 var _ IJobPartMgr = &jobPartMgr{}
+
 // debug knob
 var DebugSkipFiles = make(map[string]bool)
 
@@ -844,6 +845,12 @@ func (jpm *jobPartMgr) Close() {
 	jpm.httpHeaders = common.ResourceHTTPHeaders{}
 	jpm.metadata = common.Metadata{}
 	jpm.preserveLastModifiedTime = false
+
+	/*
+	 * Setting this pipeline nil as it breaks circular dependency, where jpm not freed as it has reference
+	 * in pipeline and pipeline not freed as jpm has pipeline reference.
+	 */
+	jpm.pipeline = nil
 	// TODO: Delete file?
 	/*if err := os.Remove(jpm.planFile.Name()); err != nil {
 		jpm.Panic(fmt.Errorf("error removing Job Part Plan file %s. Error=%v", jpm.planFile.Name(), err))
