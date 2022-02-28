@@ -98,18 +98,13 @@ func (c *crawler) runWorkersToCompletion(ctx context.Context) {
 func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerIndex int) {
 	defer wg.Done()
 
-	var err error
 	mayHaveMore := true
 	for mayHaveMore && ctx.Err() == nil {
-		mayHaveMore, err = c.processOneDirectory(ctx, workerIndex)
-		if err != nil {
-			c.output <- CrawlResult{err: err}
-			// output the error, but we don't necessarily stop the enumeration (e.g. it might be one unreadable dir)
-		}
+		mayHaveMore = c.processOneDirectory(ctx, workerIndex)
 	}
 }
 
-func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (bool, error) {
+func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) bool {
 	const maxQueueDirectories = 1000 * 1000
 	const maxQueueDirsForBreadthFirst = 100 * 1000 // figure is somewhat arbitrary.  Want it big, but not huge
 
@@ -160,7 +155,7 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 	}
 	c.cond.L.Unlock()
 	if stop {
-		return false, nil
+		return false
 	}
 
 	// find dir's immediate children (outside the lock, because this could be slow)
@@ -174,7 +169,7 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 		case <-ctx.Done(): // don't block on full channel if cancelled
 		}
 	}
-	bodyErr := c.workerBody(toExamine, addDir, addOutput) // this is the worker body supplied by our caller
+	c.workerBody(toExamine, addDir, addOutput) // this is the worker body supplied by our caller
 
 	// finally, update shared state (inside the lock)
 	c.cond.L.Lock()
@@ -196,8 +191,8 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 		time.Since(c.lastAutoShutdown) > time.Second // adjust somewhat gradually
 	if shouldShutSelfDown {
 		c.lastAutoShutdown = time.Now()
-		return false, bodyErr
+		return false
 	}
 
-	return true, bodyErr // true because, as far as we know, the work is not finished. And err because it was the err (if any) from THIS dir
+	return true // true because, as far as we know, the work is not finished.
 }

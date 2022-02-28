@@ -110,7 +110,11 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 			fsEntry := entry.(FileSystemEntry)
 			err = walkFn(fsEntry.fullPath, fsEntry.info, nil)
 		} else {
-			err = walkFn("", nil, err) // cannot supply path here, because crawlResult probably doesn't have one, due to the error
+			if fsEntry, ok := entry.(FileSystemEntry); ok {
+				err = walkFn(fsEntry.fullPath, fsEntry.info, err)
+			} else {
+				err = walkFn("", nil, err) // cannot supply path here, because crawlResult probably doesn't have one, due to the error
+			}
 		}
 		if err != nil {
 			cancel()
@@ -125,6 +129,7 @@ func enumerateOneFileSystemDirectory(dir Directory, enqueueDir func(Directory), 
 
 	d, err := os.Open(dirString) // for directories, we don't need a special open with FILE_FLAG_BACKUP_SEMANTICS, because directory opening uses FindFirst which doesn't need that flag. https://blog.differentpla.net/blog/2007/05/25/findfirstfile-and-se_backup_name
 	if err != nil {
+		enqueueOutput(FileSystemEntry{dirString, nil}, err)
 		return err
 	}
 	defer d.Close()
@@ -138,12 +143,17 @@ func enumerateOneFileSystemDirectory(dir Directory, enqueueDir func(Directory), 
 			}
 			return nil
 		} else if err != nil {
+			enqueueOutput(FileSystemEntry{dirString, nil}, err)
 			return err
 		}
 		for _, childInfo := range list {
 			if failable, ok := childInfo.(failableFileInfo); ok && failable.Error() != nil {
+				childEntry := FileSystemEntry{
+					fullPath: filepath.Join(dirString, childInfo.Name()),
+					info:     childInfo,
+				}
 				// while Readdir as a whole did not fail, this particular file info did
-				enqueueOutput(FileSystemEntry{}, failable.Error())
+				enqueueOutput(childEntry, failable.Error())
 				continue
 			}
 			childEntry := FileSystemEntry{
