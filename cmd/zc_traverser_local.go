@@ -147,6 +147,7 @@ type symlinkTargetFileInfo struct {
 	name string
 }
 
+// ErrorFileInfo holds information about files and folders that failed enumeration.
 type ErrorFileInfo struct {
 	FilePath string
 	FileInfo os.FileInfo
@@ -214,36 +215,40 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 				result, err := UnfurlSymlinks(filePath)
 
 				if err != nil {
-					WarnStdoutAndScanningLog(fmt.Sprintf("Failed to resolve symlink %s: %s", filePath, err))
+					err = fmt.Errorf("Failed to resolve symlink %s: %s", filePath, err)
+					WarnStdoutAndScanningLog(err.Error())
 					if errorChannel != nil {
-						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: fileError}
+						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
 					}
 					return nil
 				}
 
 				result, err = filepath.Abs(result)
 				if err != nil {
-					WarnStdoutAndScanningLog(fmt.Sprintf("Failed to get absolute path of symlink result %s: %s", filePath, err))
+					err = fmt.Errorf("Failed to get absolute path of symlink result %s: %s", filePath, err)
+					WarnStdoutAndScanningLog(err.Error())
 					if errorChannel != nil {
-						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: fileError}
+						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
 					}
 					return nil
 				}
 
 				slPath, err := filepath.Abs(filePath)
 				if err != nil {
-					WarnStdoutAndScanningLog(fmt.Sprintf("Failed to get absolute path of %s: %s", filePath, err))
+					err = fmt.Errorf("Failed to get absolute path of %s: %s", filePath, err)
+					WarnStdoutAndScanningLog(err.Error())
 					if errorChannel != nil {
-						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: fileError}
+						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
 					}
 					return nil
 				}
 
 				rStat, err := os.Stat(result)
 				if err != nil {
-					WarnStdoutAndScanningLog(fmt.Sprintf("Failed to get properties of symlink target at %s: %s", result, err))
+					err = fmt.Errorf("Failed to get properties of symlink target at %s: %s", result, err)
+					WarnStdoutAndScanningLog(err.Error())
 					if errorChannel != nil {
-						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: fileError}
+						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
 					}
 					return nil
 				}
@@ -293,9 +298,10 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 				result, err := filepath.Abs(filePath)
 
 				if err != nil {
-					WarnStdoutAndScanningLog(fmt.Sprintf("Failed to get absolute path of %s: %s", filePath, err))
+					err = fmt.Errorf("Failed to get absolute path of %s: %s", filePath, err)
+					WarnStdoutAndScanningLog(err.Error())
 					if errorChannel != nil {
-						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: fileError}
+						errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
 					}
 					return nil
 				}

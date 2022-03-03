@@ -301,6 +301,8 @@ type enumerationCounterFunc func(entityType common.EntityType)
 // ctx, pipeline are only required for remote resources.
 // followSymlinks is only required for local resources (defaults to false)
 // errorOnDirWOutRecursive is used by copy.
+// If errorChannel is non-nil, all errors encountered during enumeration will be conveyed through this channel.
+// To avoid slowdowns, use a buffered channel of enough capacity.
 
 func InitResourceTraverser(resource common.ResourceString, location common.Location, ctx *context.Context,
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
