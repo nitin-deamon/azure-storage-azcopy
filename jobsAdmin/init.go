@@ -24,12 +24,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
 	"io/ioutil"
 	"math"
 	"net/http"
 	"time"
-
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 
@@ -37,6 +36,7 @@ import (
 )
 
 var steCtx = context.Background()
+
 
 const EMPTY_SAS_STRING = ""
 
@@ -123,19 +123,19 @@ func MainSTE(concurrency ste.ConcurrencySettings, targetRateInMegaBitsPerSec flo
 			serialize(ListJobTransfers(payload), writer) // TODO: make struct
 		})
 	/*
-		http.HandleFunc(common.ERpcCmd.CancelJob().Pattern(),
-			func(writer http.ResponseWriter, request *http.Request) {
-				var payload common.JobID
-				deserialize(request, &payload)
-				serialize(CancelPauseJobOrder(payload, common.EJobStatus.Cancelling()), writer)
-			})
-		http.HandleFunc(common.ERpcCmd.PauseJob().Pattern(),
-			func(writer http.ResponseWriter, request *http.Request) {
-				var payload common.JobID
-				deserialize(request, &payload)
-				serialize(CancelPauseJobOrder(payload, common.EJobStatus.Paused()), writer)
-			})
-	*/
+	http.HandleFunc(common.ERpcCmd.CancelJob().Pattern(),
+		func(writer http.ResponseWriter, request *http.Request) {
+			var payload common.JobID
+			deserialize(request, &payload)
+			serialize(CancelPauseJobOrder(payload, common.EJobStatus.Cancelling()), writer)
+		})
+	http.HandleFunc(common.ERpcCmd.PauseJob().Pattern(),
+		func(writer http.ResponseWriter, request *http.Request) {
+			var payload common.JobID
+			deserialize(request, &payload)
+			serialize(CancelPauseJobOrder(payload, common.EJobStatus.Paused()), writer)
+		})
+	 */
 	http.HandleFunc(common.ERpcCmd.ResumeJob().Pattern(),
 		func(writer http.ResponseWriter, request *http.Request) {
 			var payload common.ResumeJobRequest
@@ -215,7 +215,6 @@ func CancelPauseJobOrder(jobID common.JobID, desiredJobStatus common.JobStatus) 
 	}
 	return jm.CancelPauseJobOrder(desiredJobStatus)
 }
-
 /*
 	// Search for the Part 0 of the Job, since the Part 0 status concludes the actual status of the Job
 	jpm, found := jm.JobPartMgr(0)
