@@ -459,6 +459,30 @@ func GetJobSummary(jobID common.JobID) common.ListJobSummaryResponse {
 	}
 	part0PlanStatus := part0.Plan().JobStatus()
 
+	// This is added to let FE to continue fetching the Job Progress Summary
+	// in case of resume. In case of resume, the Job is already completely
+	// ordered so the progress summary should be fetched until all job parts
+	// are iterated and have been scheduled
+	js.CompleteJobOrdered = js.CompleteJobOrdered || jm.AllTransfersScheduled()
+
+	if part0PlanStatus != common.EJobStatus.Cancelled() &&
+		(js.CompleteJobOrdered) && (part0PlanStatus.IsJobDone()) {
+		/*
+		 * Plan file (hence part0PlanStatus.IsJobDone) is updated inline by jm.reportJobPartDoneHandler()
+		 * while the various transfer stats are updated via xferDone messages processed by handleStatusUpdateMessage().
+		 * Now that the job has completed, make sure we drain all queued-but-not-processed-yet xferDone messages so as to
+		 * return correct updated job status to our caller who may not call us again since we declare job completion.
+		 */
+		if jm.DrainXferDoneMessages() {
+			// Let's get JobStatus once again to get the updated value.
+			js = jm.ListJobSummary()
+			js.Timestamp = time.Now().UTC()
+			js.JobID = jm.JobID()
+			js.ErrorMsg = ""
+			js.CompleteJobOrdered = true
+		}
+	}
+
 	// Add on byte count from files in flight, to get a more accurate running total
 	js.TotalBytesTransferred += jm.SuccessfulBytesInActiveFiles()
 	if js.TotalBytesExpected == 0 {
@@ -467,12 +491,6 @@ func GetJobSummary(jobID common.JobID) common.ListJobSummaryResponse {
 	} else {
 		js.PercentComplete = 100 * float32(js.TotalBytesTransferred) / float32(js.TotalBytesExpected)
 	}
-
-	// This is added to let FE to continue fetching the Job Progress Summary
-	// in case of resume. In case of resume, the Job is already completely
-	// ordered so the progress summary should be fetched until all job parts
-	// are iterated and have been scheduled
-	js.CompleteJobOrdered = js.CompleteJobOrdered || jm.AllTransfersScheduled()
 
 	js.BytesOverWire = uint64(JobsAdmin.BytesOverWire())
 
@@ -506,7 +524,7 @@ func GetJobSummary(jobID common.JobID) common.ListJobSummaryResponse {
 		}
 
 		if js.JobStatus.IsJobDone() {
-			js.PerformanceAdvice = JobsAdmin.TryGetPerformanceAdvice(js.TotalBytesExpected, js.TotalTransfers-js.TransfersSkipped, part0.Plan().FromTo, dir, p )
+			js.PerformanceAdvice = JobsAdmin.TryGetPerformanceAdvice(js.TotalBytesExpected, js.TotalTransfers-js.TransfersSkipped, part0.Plan().FromTo, dir, p)
 		}
 	}
 
