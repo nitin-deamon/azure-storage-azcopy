@@ -479,6 +479,7 @@ func GetJobSummary(jobID common.JobID) common.ListJobSummaryResponse {
 			js.Timestamp = time.Now().UTC()
 			js.JobID = jm.JobID()
 			js.ErrorMsg = ""
+			js.CompleteJobOrdered = true
 		}
 	}
 

@@ -61,11 +61,15 @@ func (jm *jobMgr) SendXferDoneMsg(msg xferDoneMsg) {
 }
 
 func (jm *jobMgr) ListJobSummary() common.ListJobSummaryResponse {
+	/*
+	 * Query job summary from handleStatusUpdateManager, but only if it's running.
+	 * Ideally we should never find it exited, but we play safe, else we will be blocked for ever.
+	 */
 	if !jm.jstm.doneHandleStatusUpdateManager {
 		jm.jstm.listReq <- true
 		return <-jm.jstm.respChan
 	} else {
-		return common.ListJobSummaryResponse{}
+		return jm.jstm.js
 	}
 }
 
@@ -78,11 +82,15 @@ func (jm *jobMgr) ResurrectSummary(js common.ListJobSummaryResponse) {
 //
 // Note: This is not thread safe function. Onus on caller to handle that.
 func (jm *jobMgr) DrainXferDoneMessages() bool {
+	// Poke handleStatusUpdateManager to drain the xferDone channel, but only if it's running.
 	if !jm.jstm.doneHandleStatusUpdateManager && !jm.jstm.xferDoneDrainCalled {
 		jm.jstm.xferDoneDrainCalled = true
 		jm.jstm.drainXferDoneSignal <- struct{}{}
 		close(jm.jstm.xferDone)
+
+		// Wait for handleStatusUpdateManager while it drains messages from the xferDone channel.
 		<-jm.jstm.xferDoneDrainedSignal
+
 		return true
 	} else {
 		jm.Log(pipeline.LogError, fmt.Sprintf("DrainXferDoneMessages already called and its status: %s", common.IffString(jm.jstm.xferDoneDrained, "Success", "Running")))
@@ -100,7 +108,8 @@ func drainXferDoneCh(jm *jobMgr) {
 	jstm := jm.jstm
 	js := &jstm.js
 
-	jm.Log(pipeline.LogError, fmt.Sprintf("len: %v, cap: %v", len(jstm.xferDone), cap(jstm.xferDone)))
+	jm.Log(pipeline.LogError, fmt.Sprintf("xferDoneCh: len: %v, cap: %v", len(jstm.xferDone), cap(jstm.xferDone)))
+
 	for msg := range jstm.xferDone {
 		processXferDoneMsg(msg, js)
 	}
@@ -112,6 +121,7 @@ func drainXferDoneCh(jm *jobMgr) {
 func processXferDoneMsg(msg common.TransferDetail, js *common.ListJobSummaryResponse) {
 	msg.Src = common.URLStringExtension(msg.Src).RedactSecretQueryParamForLogging()
 	msg.Dst = common.URLStringExtension(msg.Dst).RedactSecretQueryParamForLogging()
+
 	switch msg.TransferStatus {
 	case common.ETransferStatus.Success():
 		js.TransfersCompleted++
@@ -134,6 +144,11 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 	js.JobID = jm.jobID
 	js.CompleteJobOrdered = false
 	js.ErrorMsg = ""
+
+	// Set jstm.doneHandleStatusUpdateManager when handleStatusUpdateMessage goroutine exits.
+	defer func() {
+		jstm.doneHandleStatusUpdateManager = true
+	}()
 
 	for {
 		select {
@@ -164,11 +179,9 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 
 			case <-jstm.done:
 				fmt.Println("Cleanup JobStatusmgr")
-				jstm.doneHandleStatusUpdateManager = true
 				return
 
 			}
 		}
 	}
-	jstm.doneHandleStatusUpdateManager = true
 }
