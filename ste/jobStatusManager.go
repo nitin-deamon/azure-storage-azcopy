@@ -111,7 +111,7 @@ func (jm *jobMgr) handleStatusUpdateMessage() {
 
 	for {
 		select {
-		// processMsg is high priority channel, used to process any messages lying on xferDone channel.
+		// drainXferDoneSignal is high priority channel,process any message pending on xferDone channel.
 		case <-jstm.drainXferDoneSignal:
 			handleXferDoneMsg(jm)
 
