@@ -103,7 +103,7 @@ type IJobMgr interface {
 	DeferredCleanupJobMgr()
 	CleanupJobStatusMgr()
 
-	DrainXferDoneMessages()
+	DrainXferDoneMessages() bool
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -712,14 +712,16 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 // But that's inevitable as we want it to be sync call. We try to make risk factor as low as we can, by calling this function only once.
 //
 // Note: This is not thread safe function. Onus on caller to handle that.
-func (jm *jobMgr) DrainXferDoneMessages() {
+func (jm *jobMgr) DrainXferDoneMessages() bool {
 	if !jm.jstm.xferDoneDrainCalled {
 		jm.jstm.xferDoneDrainCalled = true
 		jm.jstm.drainXferDoneSignal <- struct{}{}
 		close(jm.jstm.xferDone)
 		<-jm.jstm.xferDoneDrainedSignal
+		return true
 	} else {
 		jm.Log(pipeline.LogError, fmt.Sprintf("DrainXferDoneMessages already called and its status: %s", common.IffString(jm.jstm.xferDoneDrained, "Success", "Running")))
+		return false
 	}
 }
 
