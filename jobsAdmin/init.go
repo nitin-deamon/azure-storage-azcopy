@@ -502,7 +502,13 @@ func GetJobSummary(jobID common.JobID) common.ListJobSummaryResponse {
 		// Job is completed if Job order is complete AND ALL transfers are completed/failed
 		// FIX: active or inactive state, then job order is said to be completed if final part of job has been ordered.
 		if (js.CompleteJobOrdered) && (part0PlanStatus.IsJobDone()) {
-			jm.ProcessMsg()
+			/*
+			 * Plan file (hence part0PlanStatus.IsJobDone) is updated inline by jm.reportJobPartDoneHandler()
+			 * while the various transfer stats are updated via xferDone messages processed by handleStatusUpdateMessage().
+			 * Now that the job has completed, make sure we drain all queued-but-not-processed-yet xferDone messages so as to
+			 * return correct updated job status to our caller who may not call us again since we declare job completion.
+			 */
+			jm.DrainXferDoneMessages()
 			js.JobStatus = part0PlanStatus
 		}
 

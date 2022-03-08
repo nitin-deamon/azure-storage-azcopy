@@ -103,7 +103,7 @@ type IJobMgr interface {
 	DeferredCleanupJobMgr()
 	CleanupJobStatusMgr()
 
-	ProcessMsg()
+	DrainXferDoneMessages()
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -140,8 +140,8 @@ func NewJobMgr(concurrency ConcurrencySettings, jobID common.JobID, appCtx conte
 	jstm.partCreated = make(chan JobPartCreatedMsg, 100)
 	jstm.xferDone = make(chan xferDoneMsg, 1000)
 	jstm.done = make(chan struct{}, 1)
-	jstm.processMsg = make(chan struct{})
-	jstm.doneProcessMsg = make(chan struct{})
+	jstm.drainXferDoneSignal = make(chan struct{})
+	jstm.xferDoneDrainedSignal = make(chan struct{})
 	// Different logger for each job.
 
 	jobLogger := common.NewJobLogger(jobID, common.ELogLevel.Debug(), logFileFolder, "" /* logFileNameSuffix */)
@@ -708,10 +708,19 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 	jm.logger.CloseLog()
 }
 
-func (jm *jobMgr) ProcessMsg() {
-	jm.jstm.processMsg <- struct{}{}
-	close(jm.jstm.xferDone)
-	<-jm.jstm.doneProcessMsg
+// DrainXferDoneMessages() function drain all message on XferDone channel. There is risk of HandleStatusUpdateManager() already exited and we are blocked.
+// But that's inevitable as we want it to be sync call. We try to make risk factor as low as we can, by calling this function only once.
+//
+// Note: This is not thread safe function. Onus on caller to handle that.
+func (jm *jobMgr) DrainXferDoneMessages() {
+	if !jm.jstm.xferDoneDrainCalled {
+		jm.jstm.xferDoneDrainCalled = true
+		jm.jstm.drainXferDoneSignal <- struct{}{}
+		close(jm.jstm.xferDone)
+		<-jm.jstm.xferDoneDrainedSignal
+	} else {
+		jm.Log(pipeline.LogError, fmt.Sprintf("DrainXferDoneMessages already called and its status: %s", common.IffString(jm.jstm.xferDoneDrained, "Success", "Running")))
+	}
 }
 
 func (jm *jobMgr) ChunkStatusLogger() common.ChunkStatusLogger {
