@@ -86,6 +86,7 @@ type IJobMgr interface {
 	SendXferDoneMsg(msg xferDoneMsg)
 	ListJobSummary() common.ListJobSummaryResponse
 	ResurrectSummary(js common.ListJobSummaryResponse)
+	DrainXferDoneMessages() bool
 
 	/* Ported from jobsAdmin() */
 	ScheduleTransfer(priority common.JobPriority, jptm IJobPartTransferMgr)
@@ -102,8 +103,6 @@ type IJobMgr interface {
 	// Cleanup Functions
 	DeferredCleanupJobMgr()
 	CleanupJobStatusMgr()
-
-	DrainXferDoneMessages() bool
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -706,23 +705,6 @@ func (jm *jobMgr) DeferredCleanupJobMgr() {
 	time.Sleep(60 * time.Second)
 
 	jm.logger.CloseLog()
-}
-
-// DrainXferDoneMessages() function drain all message on XferDone channel. There is risk of HandleStatusUpdateManager() already exited and we are blocked.
-// But that's inevitable as we want it to be sync call. We try to make risk factor as low as we can, by calling this function only once.
-//
-// Note: This is not thread safe function. Onus on caller to handle that.
-func (jm *jobMgr) DrainXferDoneMessages() bool {
-	if !jm.jstm.xferDoneDrainCalled {
-		jm.jstm.xferDoneDrainCalled = true
-		jm.jstm.drainXferDoneSignal <- struct{}{}
-		close(jm.jstm.xferDone)
-		<-jm.jstm.xferDoneDrainedSignal
-		return true
-	} else {
-		jm.Log(pipeline.LogError, fmt.Sprintf("DrainXferDoneMessages already called and its status: %s", common.IffString(jm.jstm.xferDoneDrained, "Success", "Running")))
-		return false
-	}
 }
 
 func (jm *jobMgr) ChunkStatusLogger() common.ChunkStatusLogger {
