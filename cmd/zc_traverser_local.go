@@ -76,16 +76,14 @@ func (t *localTraverser) getInfoIfSingleFile() (os.FileInfo, bool, error) {
 func UnfurlSymlinks(symlinkPath string) (result string, err error) {
 	var count uint32
 	unfurlingPlan := []string{symlinkPath}
-	seenSymlinkPath := make(map[string]uint32)
 
-	if runtime.GOOS == "linux" {
+	// We need to do some special UNC path handling for windows.
+	if runtime.GOOS != "windows" {
 		return filepath.EvalSymlinks(symlinkPath)
 	}
 
 	for len(unfurlingPlan) > 0 {
 		item := unfurlingPlan[0]
-
-		seenSymlinkPath[item] = count
 
 		fi, err := os.Lstat(item)
 
@@ -103,7 +101,7 @@ func UnfurlSymlinks(symlinkPath string) (result string, err error) {
 			// Previously, we'd try to detect if the read link was a relative path by appending and starting the item
 			// However, it seems to be a fairly unlikely and hard to reproduce scenario upon investigation (Couldn't manage to reproduce the scenario)
 			// So it was dropped. However, on the off chance, we'll still do it if syntactically it makes sense.
-			if len(result) == 0 { // A relative path being "" or "." likely (and in the latter case, on our officially supported OSes, always) means that it's just the same folder.
+			if result == "" { // A relative path being "" or "." likely (and in the latter case, on our officially supported OSes, always) means that it's just the same folder.
 				result = filepath.Dir(item)
 			} else if !os.IsPathSeparator(result[0]) { // We can assume that a relative path won't start with a separator
 				possiblyResult := filepath.Join(filepath.Dir(item), result)
@@ -114,8 +112,11 @@ func UnfurlSymlinks(symlinkPath string) (result string, err error) {
 
 			result = common.ToExtendedPath(result)
 
-			// Either we can store all the symlink seen till now for this path or we count how many iterations to find out cyclic loop.
-			if _, ok := seenSymlinkPath[result]; ok {
+			/*
+			 * Either we can store all the symlink seen till now for this path or we count how many iterations to find out cyclic loop.
+			 * Choose the count method and restrict the number of links to 40. Which linux kernel adhere.
+			 */
+			if count >= 40 {
 				return "", errors.New("failed to unfurl symlink: too many links")
 			}
 
@@ -228,11 +229,10 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 
 			if (fileInfo.Mode() & unsupportedFileTypes) != 0 {
 				err := fmt.Errorf("Unsupported file type %s: %v", filePath, fileInfo.Mode())
+				WarnStdoutAndScanningLog(err.Error())
 
 				if errorChannel != nil {
 					errorChannel <- ErrorFileInfo{FilePath: filePath, FileInfo: fileInfo, ErrorMsg: err}
-				} else {
-					WarnStdoutAndScanningLog(err.Error())
 				}
 				return nil
 			}
@@ -317,7 +317,9 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 					// RAM by putting filepaths into seenDirs too, but that could be a non-trivial amount of RAM in big directories trees).
 					targetFi := symlinkTargetFileInfo{rStat, fileInfo.Name()}
 
-					return walkFunc(common.GenerateFullPath(fullPath, computedRelativePath), targetFi, fileError)
+					err := walkFunc(common.GenerateFullPath(fullPath, computedRelativePath), targetFi, fileError)
+					_, err = getProcessingError(err)
+					return err
 				}
 				return nil
 			} else {
