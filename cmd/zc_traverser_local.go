@@ -101,7 +101,7 @@ func UnfurlSymlinks(symlinkPath string) (result string, err error) {
 			// Previously, we'd try to detect if the read link was a relative path by appending and starting the item
 			// However, it seems to be a fairly unlikely and hard to reproduce scenario upon investigation (Couldn't manage to reproduce the scenario)
 			// So it was dropped. However, on the off chance, we'll still do it if syntactically it makes sense.
-			if result == "" { // A relative path being "" or "." likely (and in the latter case, on our officially supported OSes, always) means that it's just the same folder.
+			if result == "" || result == "." { // A relative path being "" or "." likely (and in the latter case, on our officially supported OSes, always) means that it's just the same folder.
 				result = filepath.Dir(item)
 			} else if !os.IsPathSeparator(result[0]) { // We can assume that a relative path won't start with a separator
 				possiblyResult := filepath.Join(filepath.Dir(item), result)
