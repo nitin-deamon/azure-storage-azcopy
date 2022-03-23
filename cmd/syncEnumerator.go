@@ -137,9 +137,21 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 	transferScheduler := newSyncTransferProcessor(cca, NumOfFilesPerDispatchJobPart, fpo)
 
 	// set up the comparator so that the source/destination can be compared
-	indexer := newObjectIndexer()
-	var comparator objectProcessor
+	indexer := newFolderObjectIndexer()
+	srcCh := make(chan StoredObject, 1000)
+	dstCh := make(chan StoredObject, 1000)
+	var comparator folderProcessor
 	var finalize func() error
+
+	sSender := func(object StoredObject) error {
+		srcCh <- object
+		return nil
+	}
+
+	dSender := func(object StoredObject) error {
+		dstCh <- object
+		return nil
+	}
 
 	switch cca.fromTo {
 	case common.EFromTo.LocalBlob(), common.EFromTo.LocalFile():
@@ -155,10 +167,12 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		// when uploading, we can delete remote objects immediately, because as we traverse the remote location
 		// we ALREADY have available a complete map of everything that exists locally
 		// so as soon as we see a remote destination object we can know whether it exists in the local source
-		comparator = newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode).processIfNecessary
+		test := newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode)
+		comparator = test.processIfNecessary
+
 		finalize = func() error {
 			// schedule every local file that doesn't exist at the destination
-			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, filters)
+			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, destCleanerFunc, filters)
 			if err != nil {
 				return err
 			}
@@ -174,11 +188,12 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize, srcCh, dstCh, sSender, dSender, test), nil
 	default:
 		indexer.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
 		// in all other cases (download and S2S), the destination is scanned/indexed first
 		// then the source is scanned and filtered based on what the destination contains
+
 		comparator = newSyncSourceComparator(indexer, transferScheduler.scheduleCopyTransfer, cca.mirrorMode).processIfNecessary
 
 		finalize = func() error {
@@ -197,7 +212,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 				deleteScheduler = newFpoAwareProcessor(fpo, newSyncLocalDeleteProcessor(cca).removeImmediately)
 			}
 
-			err = indexer.traverse(deleteScheduler, nil)
+			err = indexer.traverse(deleteScheduler, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -215,7 +230,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize, srcCh, dstCh, sSender, dSender, nil), nil
 	}
 }
 

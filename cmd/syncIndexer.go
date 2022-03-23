@@ -21,6 +21,7 @@
 package cmd
 
 import (
+	"path/filepath"
 	"strings"
 )
 
@@ -32,6 +33,8 @@ type objectIndexer struct {
 	indexMap map[string]StoredObject
 	counter  int
 
+	enumerationDone bool
+
 	// isDestinationCaseInsensitive is true when the destination is case-insensitive
 	// In Windows, both paths D:\path\to\dir and D:\Path\TO\DiR point to the same resource.
 	// Apple File System (APFS) can be configured to be case-sensitive or case-insensitive.
@@ -39,8 +42,44 @@ type objectIndexer struct {
 	isDestinationCaseInsensitive bool
 }
 
+type folderObjectIndexer struct {
+	srcFolderMap map[string]objectIndexer
+
+	destFolderMap map[string]objectIndexer
+
+	currentDepth int
+
+	isDestinationCaseInsensitive bool
+}
+
 func newObjectIndexer() *objectIndexer {
 	return &objectIndexer{indexMap: make(map[string]StoredObject)}
+}
+
+func newFolderObjectIndexer() *folderObjectIndexer {
+	return &folderObjectIndexer{srcFolderMap: make(map[string]objectIndexer), currentDepth: 0, destFolderMap: make(map[string]objectIndexer)}
+}
+
+func (i *folderObjectIndexer) store(StoredObject StoredObject) error {
+	if i.isDestinationCaseInsensitive {
+		lcRelativePath := strings.ToLower(StoredObject.relativePath)
+		lcFolderPath := filepath.Dir(lcRelativePath)
+		if _, ok := i.srcFolderMap[lcFolderPath]; ok {
+
+		} else {
+			i.srcFolderMap[lcFolderPath] = *newObjectIndexer()
+		}
+		i.srcFolderMap[lcFolderPath].indexMap[StoredObject.relativePath] = StoredObject
+	} else {
+		lcFolderPath := filepath.Dir(StoredObject.relativePath)
+		if _, ok := i.srcFolderMap[lcFolderPath]; ok {
+
+		} else {
+			i.srcFolderMap[lcFolderPath] = *newObjectIndexer()
+		}
+		i.srcFolderMap[lcFolderPath].indexMap[StoredObject.relativePath] = StoredObject
+	}
+	return nil
 }
 
 // process the given stored object by indexing it using its relative path
@@ -58,6 +97,27 @@ func (i *objectIndexer) store(storedObject StoredObject) (err error) {
 		i.indexMap[storedObject.relativePath] = storedObject
 	}
 	i.counter += 1
+	return
+}
+
+// go through the remaining stored objects in the map to process them
+func (i *folderObjectIndexer) traverse(processor objectProcessor, cleaner objectProcessor, filters []ObjectFilter) (err error) {
+	for _, folder := range i.srcFolderMap {
+		for _, value := range folder.indexMap {
+			if !value.isSource {
+				err = cleaner(value)
+				if err != nil {
+					return
+				}
+			} else {
+				err = processIfPassedFilters(filters, value, processor)
+				_, err = getProcessingError(err)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}
 	return
 }
 

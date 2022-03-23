@@ -20,7 +20,11 @@
 
 package cmd
 
-import "strings"
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+)
 
 // with the help of an objectIndexer containing the source objects
 // find out the destination objects that should be transferred
@@ -33,12 +37,16 @@ type syncDestinationComparator struct {
 	copyTransferScheduler objectProcessor
 
 	// storing the source objects
-	sourceIndex *objectIndexer
+	sourceIndex *folderObjectIndexer
 
 	disableComparison bool
+
+	sourceDone bool
+
+	destinationDone bool
 }
 
-func newSyncDestinationComparator(i *objectIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
+func newSyncDestinationComparator(i *folderObjectIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
 	return &syncDestinationComparator{sourceIndex: i, copyTransferScheduler: copyScheduler, destinationCleaner: cleaner, disableComparison: disableComparison}
 }
 
@@ -47,28 +55,62 @@ func newSyncDestinationComparator(i *objectIndexer, copyScheduler, cleaner objec
 // ex: we already know what the source contains, now we are looking at objects at the destination
 // if file x from the destination exists at the source, then we'd only transfer it if it is considered stale compared to its counterpart at the source
 // if file x does not exist at the source, then it is considered extra, and will be deleted
-func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredObject) error {
-	sourceObjectInMap, present := f.sourceIndex.indexMap[destinationObject.relativePath]
-	if !present && f.sourceIndex.isDestinationCaseInsensitive {
-		lcRelativePath := strings.ToLower(destinationObject.relativePath)
-		sourceObjectInMap, present = f.sourceIndex.indexMap[lcRelativePath]
+func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredObject, isSource bool) error {
+	var present bool
+	var sourceObjectInMap StoredObject
+	var lcFolderPath string
+	var lcRelativePath string
+
+	if f.sourceIndex.isDestinationCaseInsensitive {
+		lcRelativePath = strings.ToLower(destinationObject.relativePath)
+		lcFolderPath = filepath.Dir(lcRelativePath)
+		if _, ok := f.sourceIndex.srcFolderMap[lcFolderPath]; ok {
+			sourceObjectInMap, present = f.sourceIndex.srcFolderMap[lcFolderPath].indexMap[filepath.Base(lcRelativePath)]
+		}
+	} else {
+		lcRelativePath = destinationObject.relativePath
+		lcFolderPath = filepath.Dir(destinationObject.relativePath)
+		if _, ok := f.sourceIndex.srcFolderMap[lcFolderPath]; ok {
+			sourceObjectInMap, present = f.sourceIndex.srcFolderMap[lcFolderPath].indexMap[filepath.Base(destinationObject.relativePath)]
+		}
 	}
 
 	// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
 	if present {
-		defer delete(f.sourceIndex.indexMap, destinationObject.relativePath)
-		if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
-			err := f.copyTransferScheduler(sourceObjectInMap)
-			if err != nil {
-				return err
+		defer delete(f.sourceIndex.srcFolderMap[lcFolderPath].indexMap, filepath.Base(destinationObject.relativePath))
+		if !isSource {
+			if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
+				fmt.Printf("destinaObject: %+v", destinationObject)
+				err := f.copyTransferScheduler(sourceObjectInMap)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			if f.disableComparison || destinationObject.isMoreRecentThan(sourceObjectInMap) {
+				fmt.Printf("destinaObject: %+v", sourceObjectInMap)
+				err := f.copyTransferScheduler(sourceObjectInMap)
+				if err != nil {
+					return err
+				}
 			}
 		}
-	} else {
-		// purposefully ignore the error from destinationCleaner
-		// it's a tolerable error, since it just means some extra destination object might hang around a bit longer
-		_ = f.destinationCleaner(destinationObject)
 	}
 
+	if !present && !f.destinationDone {
+		if _, ok := f.sourceIndex.srcFolderMap[lcFolderPath]; !ok {
+			f.sourceIndex.srcFolderMap[lcFolderPath] = *newObjectIndexer()
+		}
+		destinationObject.isSource = isSource
+		f.sourceIndex.srcFolderMap[lcFolderPath].indexMap[filepath.Base(lcRelativePath)] = destinationObject
+	}
+
+	if f.destinationDone {
+		err := f.copyTransferScheduler(sourceObjectInMap)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -80,12 +122,12 @@ type syncSourceComparator struct {
 	copyTransferScheduler objectProcessor
 
 	// storing the destination objects
-	destinationIndex *objectIndexer
+	destinationIndex *folderObjectIndexer
 
 	disableComparison bool
 }
 
-func newSyncSourceComparator(i *objectIndexer, copyScheduler objectProcessor, disableComparison bool) *syncSourceComparator {
+func newSyncSourceComparator(i *folderObjectIndexer, copyScheduler objectProcessor, disableComparison bool) *syncSourceComparator {
 	return &syncSourceComparator{destinationIndex: i, copyTransferScheduler: copyScheduler, disableComparison: disableComparison}
 }
 
@@ -94,17 +136,17 @@ func newSyncSourceComparator(i *objectIndexer, copyScheduler objectProcessor, di
 //  2. present but is more recent than the entry in the map
 // note: we remove the StoredObject if it is present so that when we have finished
 // the index will contain all objects which exist at the destination but were NOT seen at the source
-func (f *syncSourceComparator) processIfNecessary(sourceObject StoredObject) error {
+func (f *syncSourceComparator) processIfNecessary(sourceObject StoredObject, isSource bool) error {
 	relPath := sourceObject.relativePath
 
 	if f.destinationIndex.isDestinationCaseInsensitive {
 		relPath = strings.ToLower(relPath)
 	}
 
-	destinationObjectInMap, present := f.destinationIndex.indexMap[relPath]
+	destinationObjectInMap, present := f.destinationIndex.srcFolderMap[filepath.Dir(relPath)].indexMap[filepath.Base(relPath)]
 
 	if present {
-		defer delete(f.destinationIndex.indexMap, relPath)
+		defer delete(f.destinationIndex.srcFolderMap[filepath.Dir(relPath)].indexMap, filepath.Base(relPath))
 
 		// if destination is stale, schedule source for transfer
 		if f.disableComparison || sourceObject.isMoreRecentThan(destinationObjectInMap) {

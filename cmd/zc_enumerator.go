@@ -54,6 +54,7 @@ type StoredObject struct {
 	md5              []byte
 	blobType         azblob.BlobType // will be "None" when unknown or not applicable
 
+	isSource bool
 	// all of these will be empty when unknown or not applicable.
 	contentDisposition string
 	cacheControl       string
@@ -263,6 +264,7 @@ type ResourceTraverser interface {
 	// Blob should ONLY check remote if it's a source.
 	// On destinations, because blobs and virtual directories can share names, we should support placing in both ways.
 	// Thus, we only check the directory syntax on blob destinations. On sources, we check both syntax and remote, if syntax isn't a directory.
+	// SyncEnabled(isSource bool)
 }
 
 type AccountTraverser interface {
@@ -543,6 +545,8 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 // given a StoredObject, process it accordingly. Used for the "real work" of, say, creating a copyTransfer from the object
 type objectProcessor func(storedObject StoredObject) error
 
+type folderProcessor func(StoredObject, bool) error
+
 // TODO: consider making objectMorpher an interface, not a func, and having newStoredObject take an array of them, instead of just one
 //   Might be easier to debug
 // modifies a StoredObject, but does NOT process it.  Used for modifications, such as pre-pending a parent path
@@ -593,7 +597,7 @@ type syncEnumerator struct {
 	secondaryTraverser ResourceTraverser
 
 	// the results from the primary traverser would be stored here
-	objectIndexer *objectIndexer
+	objectIndexer *folderObjectIndexer
 
 	// general filters apply to both the primary and secondary traverser
 	filters []ObjectFilter
@@ -601,14 +605,28 @@ type syncEnumerator struct {
 	// the processor that apply only to the secondary traverser
 	// it processes objects as scanning happens
 	// based on the data from the primary traverser stored in the objectIndexer
-	objectComparator objectProcessor
+	objectComparator folderProcessor
 
 	// a finalizer that is always called if the enumeration finishes properly
 	finalize func() error
+
+	srcPipe chan StoredObject
+	dstPipe chan StoredObject
+
+	srcSender  func(StoredObject) error
+	dstSender  func(StoredObject) error
+	comparator *syncDestinationComparator
+
+	done            chan struct{}
+	destinationDone bool
+
+	srcCount   uint64
+	dstCount   uint64
+	sourceDone bool
 }
 
-func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *objectIndexer,
-	filters []ObjectFilter, comparator objectProcessor, finalize func() error) *syncEnumerator {
+func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *folderObjectIndexer,
+	filters []ObjectFilter, comparator folderProcessor, finalize func() error, srcPipe, dstPipe chan StoredObject, sSender, dSender func(StoredObject) error, test *syncDestinationComparator) *syncEnumerator {
 	return &syncEnumerator{
 		primaryTraverser:   primaryTraverser,
 		secondaryTraverser: secondaryTraverser,
@@ -616,21 +634,99 @@ func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, i
 		filters:            filters,
 		objectComparator:   comparator,
 		finalize:           finalize,
+		srcPipe:            srcPipe,
+		dstPipe:            dstPipe,
+		srcSender:          sSender,
+		dstSender:          dSender,
+		comparator:         test,
+		done:               make(chan struct{}),
 	}
+
 }
 
 func (e *syncEnumerator) enumerate() (err error) {
+	var wg sync.WaitGroup
+	var perr error
+	var derr error
 	// enumerate the primary resource and build lookup map
-	err = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
-	if err != nil {
-		return
-	}
+	wg.Add(1)
+	go func() {
+		defer func() {
+			fmt.Println("Source Error: ", perr)
+			e.sourceDone = true
+			wg.Done()
+		}()
+		perr = e.primaryTraverser.Traverse(noPreProccessor, e.srcSender, e.filters)
+		if perr != nil {
+			return
+		}
+	}()
 
+	wg.Add(1)
 	// enumerate the secondary resource and as the objects pass the filters
 	// they will be passed to the object comparator
 	// which can process given objects based on what's already indexed
 	// note: transferring can start while scanning is ongoing
-	err = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
+	go func() {
+		defer func() {
+			fmt.Println("Destination Error: ", derr)
+			e.destinationDone = true
+			wg.Done()
+		}()
+		derr = e.secondaryTraverser.Traverse(noPreProccessor, e.dstSender, e.filters)
+		if derr != nil {
+			return
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case src := <-e.srcPipe:
+				e.srcCount++
+				e.objectComparator(src, true)
+			case dst := <-e.dstPipe:
+				e.dstCount++
+				e.objectComparator(dst, false)
+			case <-e.done:
+				fmt.Println("End of comparator")
+				return
+
+			}
+			if e.destinationDone && len(e.dstPipe) == 0 {
+				e.comparator.destinationDone = true
+			}
+		}
+
+	}()
+
+	// This will control the number of src and destination enumeration threads.
+	// Need to add channel in parallel.walk to control the threads.
+	go func() {
+		for {
+			if e.sourceDone && e.destinationDone {
+				return
+			}
+
+			if e.sourceDone {
+				fmt.Println("Increase the destination thread")
+			} else {
+				fmt.Println("Increase the source thread")
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	wg.Wait()
+
+	if perr != nil {
+		err = perr
+	} else if derr != nil {
+		err = derr
+	}
+
+	e.done <- struct{}{}
+
 	if err != nil {
 		return
 	}
