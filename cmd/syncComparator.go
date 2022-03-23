@@ -20,7 +20,10 @@
 
 package cmd
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // with the help of an objectIndexer containing the source objects
 // find out the destination objects that should be transferred
@@ -36,6 +39,10 @@ type syncDestinationComparator struct {
 	sourceIndex *objectIndexer
 
 	disableComparison bool
+
+	sourceDone bool
+
+	destinationDone bool
 }
 
 func newSyncDestinationComparator(i *objectIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
@@ -57,16 +64,29 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
 	if present {
 		defer delete(f.sourceIndex.indexMap, destinationObject.relativePath)
-		if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
-			err := f.copyTransferScheduler(sourceObjectInMap)
-			if err != nil {
-				return err
+		if destinationObject.ContainerName == "" {
+			if f.disableComparison || destinationObject.isMoreRecentThan(sourceObjectInMap) {
+				fmt.Printf("sourceObject: %+v", destinationObject)
+				err := f.copyTransferScheduler(destinationObject)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
+				fmt.Printf("destinaObject: %+v", destinationObject)
+				err := f.copyTransferScheduler(sourceObjectInMap)
+				if err != nil {
+					return err
+				}
 			}
 		}
+	} else if destinationObject.ContainerName == "" && f.destinationDone {
+		f.copyTransferScheduler(destinationObject)
+	} else if destinationObject.ContainerName != "" && f.sourceDone {
+		fmt.Println("Do Nothing we need to delete the destination in case of mirror")
 	} else {
-		// purposefully ignore the error from destinationCleaner
-		// it's a tolerable error, since it just means some extra destination object might hang around a bit longer
-		_ = f.destinationCleaner(destinationObject)
+		f.sourceIndex.store(destinationObject)
 	}
 
 	return nil

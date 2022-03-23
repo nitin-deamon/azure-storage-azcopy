@@ -138,8 +138,14 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 
 	// set up the comparator so that the source/destination can be compared
 	indexer := newObjectIndexer()
+	enumerateCh := make(chan StoredObject, 1000)
 	var comparator objectProcessor
 	var finalize func() error
+
+	sender := func(object StoredObject) error {
+		enumerateCh <- object
+		return nil
+	}
 
 	switch cca.fromTo {
 	case common.EFromTo.LocalBlob(), common.EFromTo.LocalFile():
@@ -155,7 +161,9 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		// when uploading, we can delete remote objects immediately, because as we traverse the remote location
 		// we ALREADY have available a complete map of everything that exists locally
 		// so as soon as we see a remote destination object we can know whether it exists in the local source
-		comparator = newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode).processIfNecessary
+		test := newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode)
+		comparator = test.processIfNecessary
+
 		finalize = func() error {
 			// schedule every local file that doesn't exist at the destination
 			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, filters)
@@ -174,7 +182,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize, enumerateCh, sender, test), nil
 	default:
 		indexer.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
 		// in all other cases (download and S2S), the destination is scanned/indexed first
@@ -215,7 +223,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize, enumerateCh, sender, nil), nil
 	}
 }
 

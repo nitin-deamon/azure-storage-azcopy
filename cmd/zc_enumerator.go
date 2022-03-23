@@ -605,10 +605,18 @@ type syncEnumerator struct {
 
 	// a finalizer that is always called if the enumeration finishes properly
 	finalize func() error
+
+	srcDestPipe chan StoredObject
+
+	sender          func(StoredObject) error
+	comparator      *syncDestinationComparator
+	destinationDone bool
+
+	sourceDone bool
 }
 
 func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *objectIndexer,
-	filters []ObjectFilter, comparator objectProcessor, finalize func() error) *syncEnumerator {
+	filters []ObjectFilter, comparator objectProcessor, finalize func() error, srcDestPipe chan StoredObject, sender func(StoredObject) error, test *syncDestinationComparator) *syncEnumerator {
 	return &syncEnumerator{
 		primaryTraverser:   primaryTraverser,
 		secondaryTraverser: secondaryTraverser,
@@ -616,21 +624,73 @@ func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, i
 		filters:            filters,
 		objectComparator:   comparator,
 		finalize:           finalize,
+		srcDestPipe:        srcDestPipe,
+		sender:             sender,
+		comparator:         test,
 	}
+
 }
 
 func (e *syncEnumerator) enumerate() (err error) {
+	var wg sync.WaitGroup
+	var perr error
+	var derr error
 	// enumerate the primary resource and build lookup map
-	err = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
-	if err != nil {
-		return
-	}
+	wg.Add(1)
+	go func() {
+		defer func() {
+			fmt.Println("Source Error: ", perr)
+			e.sourceDone = true
+			wg.Done()
+		}()
+		perr = e.primaryTraverser.Traverse(noPreProccessor, e.sender, e.filters)
+		if perr != nil {
+			return
+		}
+	}()
 
+	wg.Add(1)
 	// enumerate the secondary resource and as the objects pass the filters
 	// they will be passed to the object comparator
 	// which can process given objects based on what's already indexed
 	// note: transferring can start while scanning is ongoing
-	err = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
+	go func() {
+		defer func() {
+			fmt.Println("Destination Error: ", derr)
+			e.destinationDone = true
+			wg.Done()
+		}()
+		derr = e.secondaryTraverser.Traverse(noPreProccessor, e.sender, e.filters)
+		if derr != nil {
+			return
+		}
+	}()
+
+	go func() {
+		for ch := range e.srcDestPipe {
+			if e.destinationDone {
+				e.comparator.destinationDone = true
+			}
+
+			if e.sourceDone {
+				e.comparator.sourceDone = true
+			}
+
+			e.objectComparator(ch)
+		}
+		fmt.Println("End of comparator")
+	}()
+
+	wg.Wait()
+
+	if perr != nil {
+		err = perr
+	} else if derr != nil {
+		err = derr
+	}
+
+	close(e.srcDestPipe)
+
 	if err != nil {
 		return
 	}
