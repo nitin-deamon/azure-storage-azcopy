@@ -137,13 +137,19 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 	transferScheduler := newSyncTransferProcessor(cca, NumOfFilesPerDispatchJobPart, fpo)
 
 	// set up the comparator so that the source/destination can be compared
-	indexer := newObjectIndexer()
-	enumerateCh := make(chan StoredObject, 1000)
-	var comparator objectProcessor
+	indexer := newFolderObjectIndexer()
+	srcCh := make(chan StoredObject, 1000)
+	dstCh := make(chan StoredObject, 1000)
+	var comparator folderProcessor
 	var finalize func() error
 
-	sender := func(object StoredObject) error {
-		enumerateCh <- object
+	sSender := func(object StoredObject) error {
+		srcCh <- object
+		return nil
+	}
+
+	dSender := func(object StoredObject) error {
+		dstCh <- object
 		return nil
 	}
 
@@ -166,7 +172,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 
 		finalize = func() error {
 			// schedule every local file that doesn't exist at the destination
-			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, filters)
+			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, destCleanerFunc, filters)
 			if err != nil {
 				return err
 			}
@@ -182,11 +188,12 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize, enumerateCh, sender, test), nil
+		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize, srcCh, dstCh, sSender, dSender, test), nil
 	default:
 		indexer.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
 		// in all other cases (download and S2S), the destination is scanned/indexed first
 		// then the source is scanned and filtered based on what the destination contains
+
 		comparator = newSyncSourceComparator(indexer, transferScheduler.scheduleCopyTransfer, cca.mirrorMode).processIfNecessary
 
 		finalize = func() error {
@@ -205,7 +212,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 				deleteScheduler = newFpoAwareProcessor(fpo, newSyncLocalDeleteProcessor(cca).removeImmediately)
 			}
 
-			err = indexer.traverse(deleteScheduler, nil)
+			err = indexer.traverse(deleteScheduler, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -223,7 +230,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize, enumerateCh, sender, nil), nil
+		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize, srcCh, dstCh, sSender, dSender, nil), nil
 	}
 }
 
