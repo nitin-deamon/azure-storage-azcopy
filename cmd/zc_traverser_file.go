@@ -23,10 +23,11 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 	"github.com/Azure/azure-storage-file-go/azfile"
@@ -229,7 +230,7 @@ func (t *fileTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
 
-	cCrawled := parallel.Crawl(workerContext, directoryURL, enumerateOneDir, parallelism)
+	cCrawled := parallel.Crawl(workerContext, directoryURL, enumerateOneDir, parallelism, true, nil)
 
 	cTransformed := parallel.Transform(workerContext, cCrawled, convertToStoredObject, parallelism)
 

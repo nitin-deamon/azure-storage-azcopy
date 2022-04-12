@@ -35,6 +35,8 @@ type crawler struct {
 	unstartedDirs      []Directory // not a channel, because channels have length limits, and those get in our way
 	dirInProgressCount int64
 	lastAutoShutdown   time.Time
+	queueUnstartedDir  chan interface{}
+	isSource           bool
 }
 
 type Directory interface{}
@@ -54,13 +56,15 @@ type EnumerateOneDirFunc func(dir Directory, enqueueDir func(Directory), enqueue
 
 // Crawl crawls an abstract directory tree, using the supplied enumeration function.  May be use for whatever
 // that function can enumerate (i.e. not necessarily a local file system, just anything tree-structured)
-func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int) <-chan CrawlResult {
+func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, isSource bool, queueUnstartedDir chan interface{}) <-chan CrawlResult {
 	c := &crawler{
-		unstartedDirs: make([]Directory, 0, 1024),
-		output:        make(chan CrawlResult, 1000),
-		workerBody:    worker,
-		parallelism:   parallelism,
-		cond:          sync.NewCond(&sync.Mutex{}),
+		unstartedDirs:     make([]Directory, 0, 1024),
+		output:            make(chan CrawlResult, 1000),
+		workerBody:        worker,
+		parallelism:       parallelism,
+		cond:              sync.NewCond(&sync.Mutex{}),
+		queueUnstartedDir: queueUnstartedDir,
+		isSource:          isSource,
 	}
 	go c.start(ctx, root)
 	return c.output
@@ -80,8 +84,25 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	}
 	go heartbeat()
 
-	c.unstartedDirs = append(c.unstartedDirs, root)
+	waitForUnstartedDirs := func() {
+		for unstartedDir := range c.queueUnstartedDir {
+			c.cond.L.Lock()
+			{
+				c.unstartedDirs = append(c.unstartedDirs, unstartedDir)
+				c.cond.Broadcast()
+			}
+			c.cond.L.Unlock()
+		}
+	}
+	if !c.isSource {
+		go waitForUnstartedDirs()
+	} else {
+		c.unstartedDirs = append(c.unstartedDirs, root)
+	}
 	c.runWorkersToCompletion(ctx)
+	if c.isSource {
+		close(c.queueUnstartedDir)
+	}
 	close(c.output)
 	close(done)
 }
@@ -179,10 +200,11 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 	// finally, update shared state (inside the lock)
 	c.cond.L.Lock()
 	defer c.cond.L.Unlock()
-
-	c.unstartedDirs = append(c.unstartedDirs, foundDirectories...) // do NOT try to wait here if unstartedDirs is getting big. May cause deadlocks, due to all workers waiting and none processing the queue
-	c.dirInProgressCount--                                         // we were doing something, and now we have finished it
-	c.cond.Broadcast()                                             // let other workers know that the state has changed
+	if c.isSource {
+		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...) // do NOT try to wait here if unstartedDirs is getting big. May cause deadlocks, due to all workers waiting and none processing the queue
+	}
+	c.dirInProgressCount-- // we were doing something, and now we have finished it
+	c.cond.Broadcast()     // let other workers know that the state has changed
 
 	// If our queue of unstarted stuff is getting really huge,
 	// reduce our parallelism in the hope of preventing further excessive RAM growth.
@@ -197,6 +219,9 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 	if shouldShutSelfDown {
 		c.lastAutoShutdown = time.Now()
 		return false, bodyErr
+	}
+	if c.isSource && c.queueUnstartedDir != nil {
+		c.queueUnstartedDir <- toExamine
 	}
 
 	return true, bodyErr // true because, as far as we know, the work is not finished. And err because it was the err (if any) from THIS dir
