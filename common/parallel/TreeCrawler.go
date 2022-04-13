@@ -22,6 +22,7 @@ package parallel
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -88,7 +89,7 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 		for unstartedDir := range c.queueUnstartedDir {
 			c.cond.L.Lock()
 			{
-				c.unstartedDirs = append(c.unstartedDirs, unstartedDir)
+				c.unstartedDirs = append(c.unstartedDirs, root.(string)+unstartedDir.(string))
 				c.cond.Broadcast()
 			}
 			c.cond.L.Unlock()
@@ -99,7 +100,7 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	} else {
 		c.unstartedDirs = append(c.unstartedDirs, root)
 	}
-	c.runWorkersToCompletion(ctx)
+	c.runWorkersToCompletion(ctx, root)
 	if c.isSource {
 		close(c.queueUnstartedDir)
 	}
@@ -107,22 +108,22 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	close(done)
 }
 
-func (c *crawler) runWorkersToCompletion(ctx context.Context) {
+func (c *crawler) runWorkersToCompletion(ctx context.Context, root Directory) {
 	wg := &sync.WaitGroup{}
 	for i := 0; i < c.parallelism; i++ {
 		wg.Add(1)
-		go c.workerLoop(ctx, wg, i)
+		go c.workerLoop(ctx, wg, i, root)
 	}
 	wg.Wait()
 }
 
-func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerIndex int) {
+func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerIndex int, root Directory) {
 	defer wg.Done()
 
 	var err error
 	mayHaveMore := true
 	for mayHaveMore && ctx.Err() == nil {
-		mayHaveMore, err = c.processOneDirectory(ctx, workerIndex)
+		mayHaveMore, err = c.processOneDirectory(ctx, workerIndex, root)
 		if err != nil {
 			c.output <- CrawlResult{err: err}
 			// output the error, but we don't necessarily stop the enumeration (e.g. it might be one unreadable dir)
@@ -130,7 +131,7 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 	}
 }
 
-func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (bool, error) {
+func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int, root Directory) (bool, error) {
 	const maxQueueDirectories = 1000 * 1000
 	const maxQueueDirsForBreadthFirst = 100 * 1000 // figure is somewhat arbitrary.  Want it big, but not huge
 
@@ -221,7 +222,7 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 		return false, bodyErr
 	}
 	if c.isSource && c.queueUnstartedDir != nil {
-		c.queueUnstartedDir <- toExamine
+		c.queueUnstartedDir <- strings.ReplaceAll(toExamine.(string), root.(string), "")
 	}
 
 	return true, bodyErr // true because, as far as we know, the work is not finished. And err because it was the err (if any) from THIS dir
