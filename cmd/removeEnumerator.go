@@ -51,7 +51,7 @@ func newRemoveEnumerator(cca *CookedCopyCmdArgs) (enumerator *CopyEnumerator, er
 	sourceTraverser, err = InitResourceTraverser(cca.Source, cca.FromTo.From(), &ctx, &cca.credentialInfo,
 		nil, cca.ListOfFilesChannel, cca.Recursive, false, cca.IncludeDirectoryStubs,
 		func(common.EntityType) {}, cca.ListOfVersionIDs, false,
-		cca.LogVerbosity.ToPipelineLogLevel(), cca.CpkOptions, nil /* errorChannel */)
+		cca.LogVerbosity.ToPipelineLogLevel(), cca.CpkOptions, nil /* errorChannel */, nil, nil, false)
 
 	// report failure to create traverser
 	if err != nil {
