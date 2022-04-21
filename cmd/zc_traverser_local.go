@@ -40,9 +40,12 @@ type localTraverser struct {
 	recursive      bool
 	followSymlinks bool
 	appCtx         *context.Context
+	indexerMap     *folderIndexer
 	// a generic function to notify that a new stored object has been enumerated
 	incrementEnumerationCounter enumerationCounterFunc
 	errorChannel                chan ErrorFileInfo
+	tqueue                      chan interface{}
+	isSource                    bool
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -178,7 +181,8 @@ func (s symlinkTargetFileInfo) Name() string {
 // Separate this from the traverser for two purposes:
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
-func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo) (err error) {
+func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool,
+	errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -357,7 +361,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 					return nil
 				}
 			}
-		})
+		}, getIndexerMapSize, tqueue, isSource)
 	}
 	return
 }
@@ -394,6 +398,15 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 		return err
 	} else {
 		if t.recursive {
+
+			getIndexerMapSize := func() int64 {
+				if t.indexerMap != nil {
+					return t.indexerMap.getIndexerMapSize()
+				} else {
+					return -1
+				}
+			}
+
 			processFile := func(filePath string, fileInfo os.FileInfo, fileError error) error {
 				if fileError != nil {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Accessing %s failed with error: %s", filePath, fileError))
@@ -441,9 +454,9 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath
@@ -522,14 +535,19 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 	return
 }
 
-func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc, errorChannel chan ErrorFileInfo) *localTraverser {
+func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool) *localTraverser {
 	traverser := localTraverser{
 		fullPath:                    cleanLocalPath(fullPath),
 		recursive:                   recursive,
 		followSymlinks:              followSymlinks,
 		appCtx:                      ctx,
+		indexerMap:                  indexerMap,
 		incrementEnumerationCounter: incrementEnumerationCounter,
-		errorChannel:                errorChannel}
+		errorChannel:                errorChannel,
+		tqueue:                      tqueue,
+		isSource:                    isSource,
+	}
 	return &traverser
 }
 

@@ -20,7 +20,13 @@
 
 package cmd
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
+)
 
 // with the help of an objectIndexer containing the source objects
 // find out the destination objects that should be transferred
@@ -35,11 +41,13 @@ type syncDestinationComparator struct {
 	// storing the source objects
 	sourceIndex *objectIndexer
 
+	sourceFolderIndex *folderIndexer
+
 	disableComparison bool
 }
 
-func newSyncDestinationComparator(i *objectIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
-	return &syncDestinationComparator{sourceIndex: i, copyTransferScheduler: copyScheduler, destinationCleaner: cleaner, disableComparison: disableComparison}
+func newSyncDestinationComparator(i *folderIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
+	return &syncDestinationComparator{sourceFolderIndex: i, copyTransferScheduler: copyScheduler, destinationCleaner: cleaner, disableComparison: disableComparison}
 }
 
 // it will only schedule transfers for destination objects that are present in the indexer but stale compared to the entry in the map
@@ -48,24 +56,87 @@ func newSyncDestinationComparator(i *objectIndexer, copyScheduler, cleaner objec
 // if file x from the destination exists at the source, then we'd only transfer it if it is considered stale compared to its counterpart at the source
 // if file x does not exist at the source, then it is considered extra, and will be deleted
 func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredObject) error {
-	sourceObjectInMap, present := f.sourceIndex.indexMap[destinationObject.relativePath]
-	if !present && f.sourceIndex.isDestinationCaseInsensitive {
-		lcRelativePath := strings.ToLower(destinationObject.relativePath)
-		sourceObjectInMap, present = f.sourceIndex.indexMap[lcRelativePath]
+	var lcFolderName, lcFileName, lcRelativePath string
+	var present bool
+	var sourceObjectInMap StoredObject
+
+	if f.sourceFolderIndex.isDestinationCaseInsensitive {
+		lcRelativePath = strings.ToLower(destinationObject.relativePath)
+		lcFolderName = filepath.Dir(lcRelativePath)
+		lcFileName = filepath.Base(lcRelativePath)
+
+	} else {
+		lcRelativePath = destinationObject.relativePath
+		lcFolderName = filepath.Dir(destinationObject.relativePath)
+		lcFileName = filepath.Base(destinationObject.relativePath)
 	}
 
-	// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
-	if present {
-		defer delete(f.sourceIndex.indexMap, destinationObject.relativePath)
-		if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
-			err := f.copyTransferScheduler(sourceObjectInMap)
-			if err != nil {
-				return err
+	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
+		lcFolderName = lcRelativePath
+		lcFileName = ""
+	}
+
+	f.sourceFolderIndex.lock.Lock()
+	defer func() {
+		if present {
+			delete(f.sourceFolderIndex.folderMap[lcFolderName].indexMap, lcFileName)
+			if len(f.sourceFolderIndex.folderMap[lcFolderName].indexMap) == 0 {
+				delete(f.sourceFolderIndex.folderMap, lcFolderName)
 			}
+			f.sourceFolderIndex.counter--
+		}
+		f.sourceFolderIndex.lock.Unlock()
+	}()
+
+	foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
+
+	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
+		if (destinationObject.lastModifiedTime == time.Time{}) {
+			if !folderPresent {
+				panic("Target Enumeration has directory which is not present in source.")
+			}
+
+			// We know this folder not exist on target, lets create job order for it.
+			for ch := range foldermap.indexMap {
+				f.copyTransferScheduler(foldermap.indexMap[ch])
+				delete(foldermap.indexMap, ch)
+			}
+
+			f.sourceFolderIndex.counter = f.sourceFolderIndex.counter - int64(f.sourceFolderIndex.folderMap[lcFolderName].counter)
+			delete(f.sourceFolderIndex.folderMap, lcFolderName)
+
+			return nil
+		} else {
+			if folderPresent {
+				sourceObjectInMap = foldermap.folderObject
+				if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
+					err := f.copyTransferScheduler(sourceObjectInMap)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+	}
+
+	if folderPresent {
+		sourceObjectInMap, present = foldermap.indexMap[lcFileName]
+
+		// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
+		if present {
+			if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
+				err := f.copyTransferScheduler(sourceObjectInMap)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			_ = f.destinationCleaner(destinationObject)
 		}
 	} else {
-		// purposefully ignore the error from destinationCleaner
-		// it's a tolerable error, since it just means some extra destination object might hang around a bit longer
+		//TODO: Need to traverse target so that we can delete the folder with blob underneath.
+		//      This should handle the case where endpoint support directory delete.
 		_ = f.destinationCleaner(destinationObject)
 	}
 
@@ -80,12 +151,12 @@ type syncSourceComparator struct {
 	copyTransferScheduler objectProcessor
 
 	// storing the destination objects
-	destinationIndex *objectIndexer
+	destinationIndex *folderIndexer
 
 	disableComparison bool
 }
 
-func newSyncSourceComparator(i *objectIndexer, copyScheduler objectProcessor, disableComparison bool) *syncSourceComparator {
+func newSyncSourceComparator(i *folderIndexer, copyScheduler objectProcessor, disableComparison bool) *syncSourceComparator {
 	return &syncSourceComparator{destinationIndex: i, copyTransferScheduler: copyScheduler, disableComparison: disableComparison}
 }
 
@@ -101,10 +172,10 @@ func (f *syncSourceComparator) processIfNecessary(sourceObject StoredObject) err
 		relPath = strings.ToLower(relPath)
 	}
 
-	destinationObjectInMap, present := f.destinationIndex.indexMap[relPath]
+	destinationObjectInMap, present := f.destinationIndex.folderMap[filepath.Dir(relPath)].indexMap[filepath.Base(relPath)]
 
 	if present {
-		defer delete(f.destinationIndex.indexMap, relPath)
+		defer delete(f.destinationIndex.folderMap[filepath.Dir(relPath)].indexMap, relPath)
 
 		// if destination is stale, schedule source for transfer
 		if f.disableComparison || sourceObject.isMoreRecentThan(destinationObjectInMap) {

@@ -23,8 +23,9 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"net/url"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 	"github.com/Azure/azure-storage-blob-go/azblob"
@@ -101,7 +102,7 @@ func (t *blobAccountTraverser) Traverse(preprocessor objectMorpher, processor ob
 	for _, v := range cList {
 		containerURL := t.accountURL.NewContainerURL(v).URL()
 		containerTraverser := newBlobTraverser(&containerURL, t.p, t.ctx, true,
-			t.includeDirectoryStubs, t.incrementEnumerationCounter, t.s2sPreserveSourceTags, t.cpkOptions)
+			t.includeDirectoryStubs, t.incrementEnumerationCounter, t.s2sPreserveSourceTags, t.cpkOptions, nil, nil, false)
 
 		preprocessorForThisChild := preprocessor.FollowedBy(newContainerDecorator(v))
 
