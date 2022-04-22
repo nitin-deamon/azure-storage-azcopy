@@ -89,6 +89,9 @@ type StoredObject struct {
 	leaseStatus     azblob.LeaseStatusType
 	leaseDuration   azblob.LeaseDurationType
 	isVirtualFolder bool
+
+	// Entity changed only included by sync traversers
+	hasEntityUpdated bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {

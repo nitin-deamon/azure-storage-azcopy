@@ -23,16 +23,16 @@ package parallel
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 )
 
 type crawler struct {
-	output      chan CrawlResult
-	workerBody  EnumerateOneDirFunc
-	parallelism int
-	cond        *sync.Cond
+	output                chan CrawlResult
+	workerBody            EnumerateOneDirFunc
+	checkDirectoryUpdates CheckDirectoryUpdatesFunc
+	parallelism           int
+	cond                  *sync.Cond
 	// the following are protected by cond (and must only be accessed when cond.L is held)
 	unstartedDirs      []Directory // not a channel, because channels have length limits, and those get in our way
 	dirInProgressCount int64
@@ -60,21 +60,24 @@ func (r CrawlResult) Item() (interface{}, error) {
 // must be safe to be simultaneously called by multiple go-routines, each with a different dir
 type EnumerateOneDirFunc func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error
 
+type CheckDirectoryUpdatesFunc func(unChangedDir interface{}, enqueueOutput func(DirectoryEntry, error), root Directory) (Directory, error)
+
 // Crawl crawls an abstract directory tree, using the supplied enumeration function.  May be use for whatever
 // that function can enumerate (i.e. not necessarily a local file system, just anything tree-structured)
-func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getIndexSize func() int64, tqueue chan interface{}, isSource bool) <-chan CrawlResult {
+func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getIndexSize func() int64, tqueue chan interface{}, isSource bool, checkDirectoryUpdates CheckDirectoryUpdatesFunc) <-chan CrawlResult {
 	c := &crawler{
-		unstartedDirs:     make([]Directory, 0, 1024),
-		output:            make(chan CrawlResult, 1000),
-		workerBody:        worker,
-		parallelism:       parallelism,
-		cond:              sync.NewCond(&sync.Mutex{}),
-		ticketAvailable:   1,
-		getIndexerMapSize: getIndexSize,
-		closeAutoTune:     make(chan struct{}),
-		tqueue:            tqueue,
-		isSource:          isSource,
-		root:              root,
+		unstartedDirs:         make([]Directory, 0, 1024),
+		output:                make(chan CrawlResult, 1000),
+		workerBody:            worker,
+		parallelism:           parallelism,
+		cond:                  sync.NewCond(&sync.Mutex{}),
+		ticketAvailable:       1,
+		getIndexerMapSize:     getIndexSize,
+		closeAutoTune:         make(chan struct{}),
+		tqueue:                tqueue,
+		isSource:              isSource,
+		root:                  root,
+		checkDirectoryUpdates: checkDirectoryUpdates,
 	}
 	if tqueue != nil && !isSource {
 		c.ticketAvailable = 0
@@ -98,7 +101,7 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	go heartbeat()
 
 	if !c.isSource && c.tqueue != nil {
-		go c.receiveTqueue(root)
+		go c.receiveTqueue(ctx, root)
 	} else {
 		c.unstartedDirs = append(c.unstartedDirs, root)
 		go c.autoPacer()
@@ -136,20 +139,26 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 	}
 }
 
-func (c *crawler) receiveTqueue(root Directory) {
-	var result string
+func (c *crawler) receiveTqueue(ctx context.Context, root Directory) {
+
+	addOutput := func(de DirectoryEntry, er error) {
+		select {
+		case c.output <- CrawlResult{item: de, err: er}:
+		case <-ctx.Done(): // don't block on full channel if cancelled
+		}
+	}
+
 	for ch := range c.tqueue {
 
 		c.cond.L.Lock()
 		c.ticketAvailable += 1
-		if rootDir, ok := root.(string); ok {
-			if path, ok := ch.(string); ok {
-				path = strings.TrimPrefix(path, "/")
-				result = rootDir + path
-			}
+		path, err := c.checkDirectoryUpdates(ch, addOutput, c.root)
+		if err != nil {
+			c.output <- CrawlResult{err: err}
 		}
-		c.unstartedDirs = append(c.unstartedDirs, result)
-
+		if path != nil {
+			c.unstartedDirs = append(c.unstartedDirs, path)
+		}
 		c.cond.L.Unlock()
 		c.cond.Broadcast()
 	}
@@ -277,12 +286,7 @@ func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (boo
 	defer c.cond.L.Unlock()
 
 	if c.tqueue != nil && c.isSource {
-		if result, ok := toExamine.(string); ok {
-			if dir, ok := c.root.(string); ok {
-				//				fmt.Printf("Adding Directory: %s, %s, %s\n", result, dir, strings.TrimLeft(result, dir))
-				c.tqueue <- strings.TrimPrefix(result, dir)
-			}
-		}
+
 		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...)
 	}
 	if c.tqueue == nil {

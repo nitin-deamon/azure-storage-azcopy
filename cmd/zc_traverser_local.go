@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
@@ -435,6 +436,17 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					t.incrementEnumerationCounter(entityType)
 				}
 
+				syncProcessor := processor
+				if t.isSource && t.tqueue != nil {
+					syncProcessor = func(storedObject StoredObject) error {
+						// Replace with logic for hasEntityChanged based on sync Qualifiers
+						storedObject.hasEntityUpdated = storedObject.lastModifiedTime.After(time.Now().Add(time.Duration(-500) * time.Minute))
+						if storedObject.entityType == common.EEntityType.Folder() {
+							t.tqueue <- storedObject
+						}
+						return processor(storedObject)
+					}
+				}
 				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
 				return processIfPassedFilters(filters,
 					newStoredObject(
@@ -449,14 +461,14 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 						noMetdata,
 						"", // Local has no such thing as containers
 					),
-					processor)
+					syncProcessor)
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
 				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource)
+				return WalkWithSymlinks(context.TODO(), t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath

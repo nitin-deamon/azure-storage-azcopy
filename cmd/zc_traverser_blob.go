@@ -326,7 +326,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			marker = lResp.NextMarker
 		}
 
-		if isPresent == false {
+		if !isPresent {
 			storedObject := StoredObject{
 				name:             getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
 				relativePath:     strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
@@ -352,10 +352,30 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			return -1
 		}
 	}
+	processUnchangedDirs := func(unChangedDir interface{}, enqueueOutput func(parallel.DirectoryEntry, error), root parallel.Directory) (parallel.Directory, error) {
+		path := root.(string) + unChangedDir.(StoredObject).relativePath
+		if !unChangedDir.(StoredObject).hasEntityUpdated {
+			storedObject := StoredObject{
+				name:             getObjectNameOnly(strings.TrimSuffix(unChangedDir.(StoredObject).name, common.AZCOPY_PATH_SEPARATOR_STRING)),
+				relativePath:     strings.TrimSuffix(path, common.AZCOPY_PATH_SEPARATOR_STRING),
+				entityType:       unChangedDir.(StoredObject).entityType, // folder stubs are treated like files in in the serial lister as well
+				lastModifiedTime: unChangedDir.(StoredObject).lastModifiedTime,
+				size:             unChangedDir.(StoredObject).size,
 
+				ContainerName: containerName,
+				// Additional lease properties. To be used in listing
+
+				isVirtualFolder:  true,
+				hasEntityUpdated: false,
+			}
+			enqueueOutput(storedObject, nil)
+			return nil, nil
+		}
+		return path, nil
+	}
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, processUnchangedDirs)
 
 	for x := range cCrawled {
 		item, workerError := x.Item()

@@ -59,7 +59,6 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	var lcFolderName, lcFileName, lcRelativePath string
 	var present bool
 	var sourceObjectInMap StoredObject
-
 	if f.sourceFolderIndex.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(destinationObject.relativePath)
 		lcFolderName = filepath.Dir(lcRelativePath)
@@ -99,6 +98,21 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 			// We know this folder not exist on target, lets create job order for it.
 			for ch := range foldermap.indexMap {
 				f.copyTransferScheduler(foldermap.indexMap[ch])
+				delete(foldermap.indexMap, ch)
+			}
+
+			f.sourceFolderIndex.counter = f.sourceFolderIndex.counter - int64(f.sourceFolderIndex.folderMap[lcFolderName].counter)
+			delete(f.sourceFolderIndex.folderMap, lcFolderName)
+
+			return nil
+		} else if !destinationObject.hasEntityUpdated {
+			if !folderPresent {
+				panic("Target Enumeration has directory which is not present in source.")
+			}
+			for ch := range foldermap.indexMap {
+				if foldermap.indexMap[ch].hasEntityUpdated && foldermap.indexMap[ch].entityType == common.EEntityType.File() {
+					f.copyTransferScheduler(foldermap.indexMap[ch])
+				}
 				delete(foldermap.indexMap, ch)
 			}
 
