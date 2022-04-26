@@ -21,6 +21,7 @@
 package cmd
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	var lcFolderName, lcFileName, lcRelativePath string
 	var present bool
 	var sourceObjectInMap StoredObject
+
 	if f.sourceFolderIndex.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(destinationObject.relativePath)
 		lcFolderName = filepath.Dir(lcRelativePath)
@@ -87,8 +89,11 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		f.sourceFolderIndex.lock.Unlock()
 	}()
 
-	foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
+	if lcFolderName == "" {
+		lcFolderName = "."
+	}
 
+	foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
 	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
 		if (destinationObject.lastModifiedTime == time.Time{}) {
 			if !folderPresent {

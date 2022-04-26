@@ -70,6 +70,9 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 			lcfileName = filepath.Base(storedObject.relativePath)
 		}
 	}
+	if lcfolderName == "" {
+		lcfolderName = "."
+	}
 
 	if _, ok := i.folderMap[lcfolderName]; !ok {
 		i.folderMap[lcfolderName] = newObjectIndexer()

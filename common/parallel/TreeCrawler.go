@@ -152,6 +152,7 @@ func (c *crawler) receiveTqueue(ctx context.Context, root Directory) {
 
 		c.cond.L.Lock()
 		c.ticketAvailable += 1
+
 		path, err := c.checkDirectoryUpdates(ch, addOutput, c.root)
 		if err != nil {
 			c.output <- CrawlResult{err: err}
