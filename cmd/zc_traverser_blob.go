@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
 
@@ -55,6 +56,14 @@ type blobTraverser struct {
 	s2sPreserveSourceTags bool
 
 	cpkOptions common.CpkOptions
+
+	indexerMap *folderIndexer
+
+	tqueue chan interface{}
+
+	isSource bool
+
+	maxObjectIndexerSizeInGB uint
 }
 
 func (t *blobTraverser) IsDirectory(isSource bool) bool {
@@ -184,6 +193,7 @@ func (t *blobTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 
 		// short-circuit if we don't have anything else to scan
 		if isBlob || err != nil {
+			fmt.Println("Returned error")
 			return err
 		}
 	}
@@ -220,6 +230,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 	enumerateOneDir := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error)) error {
 		currentDirPath := dir.(string)
 
+		var isPresent bool
 		for marker := (azblob.Marker{}); marker.NotDone(); {
 			lResp, err := containerURL.ListBlobsHierarchySegment(t.ctx, marker, "/", azblob.ListBlobsSegmentOptions{Prefix: currentDirPath,
 				Details: azblob.BlobListingDetails{Metadata: true, Tags: t.s2sPreserveSourceTags}})
@@ -230,6 +241,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			// queue up the sub virtual directories if recursive is true
 			if t.recursive {
 				for _, virtualDir := range lResp.Segment.BlobPrefixes {
+					isPresent = true
 					enqueueDir(virtualDir.Name)
 
 					if t.includeDirectoryStubs {
@@ -249,7 +261,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 								common.FromAzBlobMetadataToCommonMetadata(resp.NewMetadata()),
 								containerName,
 							)
-
+							storedObject.isVirtualFolder = true
 							if t.s2sPreserveSourceTags {
 								var BlobTags *azblob.BlobTags
 								BlobTags, err = fblobURL.GetTags(t.ctx, nil)
@@ -271,10 +283,12 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 			// process the blobs returned in this result segment
 			for _, blobInfo := range lResp.Segment.BlobItems {
+
 				// if the blob represents a hdi folder, then skip it
 				if t.doesBlobRepresentAFolder(blobInfo.Metadata) {
 					continue
 				}
+				isPresent = true
 
 				storedObject := t.createStoredObjectForBlob(preprocessor, blobInfo, strings.TrimPrefix(blobInfo.Name, searchPrefix), containerName)
 
@@ -311,12 +325,59 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 			marker = lResp.NextMarker
 		}
+
+		if isPresent == false {
+			storedObject := StoredObject{
+				name:             getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
+				relativePath:     strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
+				entityType:       common.EEntityType.File(), // folder stubs are treated like files in in the serial lister as well
+				lastModifiedTime: time.Time{},
+				size:             0,
+				ContainerName:    containerName,
+				isVirtualFolder:  true,
+			}
+			enqueueOutput(storedObject, nil)
+		}
+
 		return nil
+	}
+
+	getIndexerMapSize := func() int64 {
+		if t.indexerMap != nil {
+			return t.indexerMap.getIndexerMapSize()
+		} else {
+			return -1
+		}
+	}
+
+	processUnchangedDirs := func(unChangedDir interface{}, enqueueOutput func(parallel.DirectoryEntry, error), root parallel.Directory) (parallel.Directory, error) {
+		path := root.(string) + unChangedDir.(StoredObject).relativePath
+		if !unChangedDir.(StoredObject).hasEntityUpdated {
+			storedObject := StoredObject{
+				name:             getObjectNameOnly(strings.TrimSuffix(unChangedDir.(StoredObject).name, common.AZCOPY_PATH_SEPARATOR_STRING)),
+				relativePath:     strings.TrimSuffix(path, common.AZCOPY_PATH_SEPARATOR_STRING),
+				entityType:       unChangedDir.(StoredObject).entityType, // folder stubs are treated like files in in the serial lister as well
+				lastModifiedTime: unChangedDir.(StoredObject).lastModifiedTime,
+				size:             unChangedDir.(StoredObject).size,
+
+				ContainerName: containerName,
+				// Additional lease properties. To be used in listing
+
+				isVirtualFolder:  true,
+				hasEntityUpdated: false,
+			}
+			enqueueOutput(storedObject, nil)
+			return nil, nil
+		}
+		if path != "" {
+			path = path + "/"
+		}
+		return path, nil
 	}
 
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB, processUnchangedDirs)
 
 	for x := range cCrawled {
 		item, workerError := x.Item()
@@ -330,6 +391,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		}
 
 		object := item.(StoredObject)
+
 		processErr := processIfPassedFilters(filters, object, processor)
 		_, processErr = getProcessingError(processErr)
 		if processErr != nil {
@@ -418,7 +480,8 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 	return nil
 }
 
-func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, s2sPreserveSourceTags bool, cpkOptions common.CpkOptions) (t *blobTraverser) {
+func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) (t *blobTraverser) {
 	t = &blobTraverser{
 		rawURL:                      rawURL,
 		p:                           p,
@@ -429,6 +492,10 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		parallelListing:             true,
 		s2sPreserveSourceTags:       s2sPreserveSourceTags,
 		cpkOptions:                  cpkOptions,
+		indexerMap:                  indexerMap,
+		tqueue:                      tqueue,
+		isSource:                    isSource,
+		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,
 	}
 
 	if strings.ToLower(glcm.GetEnvironmentVariable(common.EEnvironmentVariable.DisableHierarchicalScanning())) == "true" {

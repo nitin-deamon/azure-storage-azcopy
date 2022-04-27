@@ -47,13 +47,14 @@ type DirReader interface {
 // It does not follow symlinks.
 // The items in the CrawResult output channel are FileSystemEntry s.
 // For a wrapper that makes this look more like filepath.Walk, see parallel.Walk.
-func CrawlLocalDirectory(ctx context.Context, root string, parallelism int, reader DirReader) <-chan CrawlResult {
+func CrawlLocalDirectory(ctx context.Context, root string, parallelism int, reader DirReader,
+	getIndexerSize func() int64, tqueue chan interface{}, isSource bool, maxIndexerObjectSizeInGB uint) <-chan CrawlResult {
 	return Crawl(ctx,
 		root,
 		func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error {
 			return enumerateOneFileSystemDirectory(dir, enqueueDir, enqueueOutput, reader)
 		},
-		parallelism,
+		parallelism, getIndexerSize, tqueue, isSource, maxIndexerObjectSizeInGB, nil,
 	)
 }
 
@@ -63,7 +64,8 @@ func CrawlLocalDirectory(ctx context.Context, root string, parallelism int, read
 //    (whereas with filepath.Walk it will usually (always?) have a value).
 // 2. If the return value of walkFunc function is not nil, enumeration will always stop, not matter what the type of the error.
 //    (Unlike filepath.WalkFunc, where returning filePath.SkipDir is handled as a special case).
-func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc) {
+func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc,
+	getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	signalRootError := func(e error) {
@@ -103,7 +105,7 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
-	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader)
+	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getIndexerMapSize, tqueue, isSource, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
 		entry, err := crawlResult.Item()
 		if err == nil {
