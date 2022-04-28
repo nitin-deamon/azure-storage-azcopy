@@ -357,7 +357,7 @@ func (s *genericTraverserSuite) TestServiceTraverserWithWildcards(c *chk.C) {
 	scenarioHelper{}.generateLocalFilesFromList(c, dstDirName, objectList)
 
 	// Create a local traversal
-	localTraverser := newLocalTraverser(nil, dstDirName, true, true, func(common.EntityType) {})
+	localTraverser := newLocalTraverser(nil, dstDirName, true, true, func(common.EntityType) {}, nil, nil)
 
 	// Invoke the traversal with an indexer so the results are indexed for easy validation
 	localIndexer := newObjectIndexer()
