@@ -24,16 +24,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Azure/azure-pipeline-go/pipeline"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
-	"github.com/Azure/azure-storage-blob-go/azblob"
-	"github.com/Azure/azure-storage-file-go/azfile"
 	"net/url"
 	"os"
 	"path"
 	"runtime"
 	"strings"
+
+	"github.com/Azure/azure-pipeline-go/pipeline"
+	"github.com/Azure/azure-storage-blob-go/azblob"
+	"github.com/Azure/azure-storage-file-go/azfile"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
 )
 
 // extract the right info from cooked arguments and instantiate a generic copy transfer processor from it
@@ -279,6 +280,38 @@ func newRemoteResourceDeleter(rawRootURL *url.URL, p pipeline.Pipeline, ctx cont
 		targetLocation: targetLocation,
 	}
 }
+func (b *remoteResourceDeleter) deleteVirtualDirectory(prefix string) error {
+	var marker azblob.Marker
+
+	containerUrl := azblob.NewContainerURL(*b.rootURL, b.p)
+
+	for {
+		resp, err := containerUrl.ListBlobsFlatSegment(
+			b.ctx,
+			marker,
+			azblob.ListBlobsSegmentOptions{Prefix: prefix, Details: azblob.BlobListingDetails{Metadata: true}},
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, blob := range resp.Segment.BlobItems {
+			blobURLParts := azblob.NewBlobURLParts(*b.rootURL)
+			blobURLParts.BlobName = path.Join(blobURLParts.BlobName, blob.Name)
+			blobURL := azblob.NewBlobURL(blobURLParts.URL(), b.p)
+			_, err := blobURL.Delete(b.ctx, azblob.DeleteSnapshotsOptionInclude, azblob.BlobAccessConditions{})
+			if err != nil {
+				return err
+			}
+		}
+
+		if !resp.NextMarker.NotDone() {
+			break
+		}
+		marker = resp.NextMarker
+	}
+	return nil
+}
 
 func (b *remoteResourceDeleter) delete(object StoredObject) error {
 	if object.entityType == common.EEntityType.File() {
@@ -288,6 +321,9 @@ func (b *remoteResourceDeleter) delete(object StoredObject) error {
 		case common.ELocation.Blob():
 			blobURLParts := azblob.NewBlobURLParts(*b.rootURL)
 			blobURLParts.BlobName = path.Join(blobURLParts.BlobName, object.relativePath)
+			if object.isVirtualFolder {
+				return b.deleteVirtualDirectory(blobURLParts.BlobName)
+			}
 			blobURL := azblob.NewBlobURL(blobURLParts.URL(), b.p)
 			_, err := blobURL.Delete(b.ctx, azblob.DeleteSnapshotsOptionInclude, azblob.BlobAccessConditions{})
 			return err
