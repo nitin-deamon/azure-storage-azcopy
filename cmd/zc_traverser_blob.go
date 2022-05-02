@@ -64,6 +64,10 @@ type blobTraverser struct {
 	isSource bool
 
 	maxObjectIndexerSizeInGB uint
+
+	lastSync time.Time
+
+	cfdMode CFDModeFlags
 }
 
 func (t *blobTraverser) IsDirectory(isSource bool) bool {
@@ -223,14 +227,62 @@ func (t *blobTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 	return t.serialList(containerURL, blobUrlParts.ContainerName, searchPrefix, extraSearchPrefix, preprocessor, processor, filters)
 }
 
+// HasDirectoryChangedSinceLastSync checks directory changed since lastSyncTime.
+// It honours CFDMode to make the decision, f.e., if CFDMode allows ctime/mtime to be used for CFD it may not need to query
+// attributes from target. If it returns True, TargetTraverser will enumerate the directory and compare each enumerated object
+// with the source scanned objects in ObjectIndexer[] to find out if the object needs to be sync'ed.
+//
+// Note: For CFDModes that allow ctime for CFD we can avoid enumerating target dir if we know directory has not changed.
+//       This increases sync efficiency.
+//
+// Note: If we discover that certain sources cannot be safely trusted for ctime update we can change this to return True for them,
+//       thus falling back on the more rigorous target<->source comparison.
+func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject) bool {
+	// CFDMode is to enumerate Target and compare. So we return true in that case.
+	// This will lead to enumeration of target.
+	if t.cfdMode.TargetCompare {
+		return true
+	}
+
+	if t.cfdMode.Ctime || t.cfdMode.CtimeMtime {
+		if so.lastChangeTime.After(t.lastSync) {
+			return true
+		}
+		return false
+	} else if t.cfdMode.archiveBit {
+		// TODO: Add the code to get the attributes of dir and check with the last sync time.
+		if !so.archiveBit {
+			return true
+		}
+		return false
+	} else {
+		// FallBack to default case to enumerate whole target.
+		return true
+	}
+}
+
 func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, containerName string, searchPrefix string,
 	extraSearchPrefix string, preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) error {
 	// Define how to enumerate its contents
 	// This func must be thread safe/goroutine safe
 	enumerateOneDir := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error)) error {
-		currentDirPath := dir.(string)
+		if _, ok := dir.(StoredObject); !ok {
+			panic("Entry in queue is not storedObject")
+		}
+		so := dir.(StoredObject)
+		currentDirPath := so.relativePath
 
-		var isPresent bool
+		// Check the directory if we need enumeration at target side or not.
+		if t.tqueue != nil && !t.isSource && !t.HasDirectoryChangedSinceLastSync(so) {
+			goto Finalize
+		}
+
+		// This is applicable for only sync mode as source local give path without forward slash.
+		// TODO: Need to modify the source(Local) traverser to add forward slash.
+		if t.tqueue != nil && !t.isSource && currentDirPath != "" {
+			currentDirPath = currentDirPath + "/"
+		}
+
 		for marker := (azblob.Marker{}); marker.NotDone(); {
 			lResp, err := containerURL.ListBlobsHierarchySegment(t.ctx, marker, "/", azblob.ListBlobsSegmentOptions{Prefix: currentDirPath,
 				Details: azblob.BlobListingDetails{Metadata: true, Tags: t.s2sPreserveSourceTags}})
@@ -241,7 +293,6 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			// queue up the sub virtual directories if recursive is true
 			if t.recursive {
 				for _, virtualDir := range lResp.Segment.BlobPrefixes {
-					isPresent = true
 					enqueueDir(virtualDir.Name)
 
 					if t.includeDirectoryStubs {
@@ -288,7 +339,6 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				if t.doesBlobRepresentAFolder(blobInfo.Metadata) {
 					continue
 				}
-				isPresent = true
 
 				storedObject := t.createStoredObjectForBlob(preprocessor, blobInfo, strings.TrimPrefix(blobInfo.Name, searchPrefix), containerName)
 
@@ -326,19 +376,19 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			marker = lResp.NextMarker
 		}
 
-		if isPresent == false {
-			storedObject := StoredObject{
-				name:             getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
-				relativePath:     strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
-				entityType:       common.EEntityType.File(), // folder stubs are treated like files in in the serial lister as well
-				lastModifiedTime: time.Time{},
-				size:             0,
-				ContainerName:    containerName,
-				isVirtualFolder:  true,
-			}
-			enqueueOutput(storedObject, nil)
+	Finalize:
+		// This storedObject marks the end of folder enumeration.
+		storedObject := StoredObject{
+			name:              getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
+			relativePath:      strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
+			entityType:        common.EEntityType.File(), // folder stubs are treated like files in in the serial lister as well
+			lastModifiedTime:  time.Time{},
+			size:              0,
+			ContainerName:     containerName,
+			isVirtualFolder:   true,
+			isFolderEndMarker: true,
 		}
-
+		enqueueOutput(storedObject, nil)
 		return nil
 	}
 
@@ -350,34 +400,9 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		}
 	}
 
-	processUnchangedDirs := func(unChangedDir interface{}, enqueueOutput func(parallel.DirectoryEntry, error), root parallel.Directory) (parallel.Directory, error) {
-		path := root.(string) + unChangedDir.(StoredObject).relativePath
-		if !unChangedDir.(StoredObject).hasEntityUpdated {
-			storedObject := StoredObject{
-				name:             getObjectNameOnly(strings.TrimSuffix(unChangedDir.(StoredObject).name, common.AZCOPY_PATH_SEPARATOR_STRING)),
-				relativePath:     strings.TrimSuffix(path, common.AZCOPY_PATH_SEPARATOR_STRING),
-				entityType:       unChangedDir.(StoredObject).entityType, // folder stubs are treated like files in in the serial lister as well
-				lastModifiedTime: unChangedDir.(StoredObject).lastModifiedTime,
-				size:             unChangedDir.(StoredObject).size,
-
-				ContainerName: containerName,
-				// Additional lease properties. To be used in listing
-
-				isVirtualFolder:  true,
-				hasEntityUpdated: false,
-			}
-			enqueueOutput(storedObject, nil)
-			return nil, nil
-		}
-		if path != "" {
-			path = path + "/"
-		}
-		return path, nil
-	}
-
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB, processUnchangedDirs)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB)
 
 	for x := range cCrawled {
 		item, workerError := x.Item()
@@ -481,7 +506,8 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 }
 
 func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
-	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) (t *blobTraverser) {
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, lastSync time.Time,
+	cfdMode CFDModeFlags) (t *blobTraverser) {
 	t = &blobTraverser{
 		rawURL:                      rawURL,
 		p:                           p,
@@ -496,6 +522,8 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		tqueue:                      tqueue,
 		isSource:                    isSource,
 		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,
+		lastSync:                    lastSync,
+		cfdMode:                     cfdMode,
 	}
 
 	if strings.ToLower(glcm.GetEnvironmentVariable(common.EEnvironmentVariable.DisableHierarchicalScanning())) == "true" {

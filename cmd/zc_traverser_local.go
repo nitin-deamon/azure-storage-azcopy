@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -178,12 +179,13 @@ func (s symlinkTargetFileInfo) Name() string {
 	return s.name // override the name
 }
 
+//type WalkFunc() (StoredObject, error)
 // WalkWithSymlinks is a symlinks-aware, parallelized, version of filePath.Walk.
 // Separate this from the traverser for two purposes:
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
-func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool,
-	errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) (err error) {
+func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
+	tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, enumerateOneFileSystemDirectory parallel.EnumerateOneDir, constructStoredObject parallel.StoredObjectFunc) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -244,7 +246,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 
 			if fileInfo.Mode()&os.ModeSymlink != 0 {
 				if !followSymlinks {
-					return nil // skip it
+					return nil
 				}
 
 				/*
@@ -362,7 +364,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 					return nil
 				}
 			}
-		}, getIndexerMapSize, tqueue, isSource, maxObjectIndexerSizeInGB)
+		}, enumerateOneFileSystemDirectory, constructStoredObject, getIndexerMapSize, tqueue, isSource, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -408,6 +410,31 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 				}
 			}
 
+			// constructStoredObject creates the storedObject from fileInfo.
+			constructStoredObject := func(filePath string, fileInfo os.FileInfo) interface{} {
+				var entityType common.EntityType
+				relPath := strings.TrimPrefix(strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(t.fullPath)), common.DeterminePathSeparator(t.fullPath))
+				if fileInfo.IsDir() {
+					entityType = common.EEntityType.Folder()
+				} else {
+					entityType = common.EEntityType.File()
+				}
+				so := newStoredObject(
+					preprocessor,
+					fileInfo.Name(),
+					strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
+					entityType,
+					fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
+					fileInfo.Size(),
+					noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
+					noBlobProps,
+					noMetdata,
+					"", // Local has no such thing as containers
+				)
+				so.fullPath = filePath
+				return so
+			}
+
 			processFile := func(filePath string, fileInfo os.FileInfo, fileError error) error {
 				if fileError != nil {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Accessing %s failed with error: %s", filePath, fileError))
@@ -432,45 +459,84 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					return nil
 				}
 
+				storedObject := constructStoredObject(filePath, fileInfo)
+
 				if t.incrementEnumerationCounter != nil {
 					t.incrementEnumerationCounter(entityType)
 				}
 
-				syncProcessor := processor
-				if t.isSource && t.tqueue != nil {
-					syncProcessor = func(storedObject StoredObject) error {
-						// Replace with logic for hasEntityChanged based on sync Qualifiers
-						// storedObject.hasEntityUpdated = storedObject.lastModifiedTime.After(time.Now().Add(time.Duration(-500) * time.Minute))
-						storedObject.hasEntityUpdated = true
-						if storedObject.entityType == common.EEntityType.Folder() {
-							t.tqueue <- storedObject
-						}
-						return processor(storedObject)
-					}
+				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
+				return processIfPassedFilters(filters, storedObject.(StoredObject),
+					processor)
+			}
+
+			// enumerateOneFileSystemDirectory is an implementation of EnumerateOneDirFunc specifically for the local file system
+			enumerateOneFileSystemDirectory := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error), r parallel.DirReader) error {
+				var dirString string
+				so := dir.(StoredObject)
+
+				if so.fullPath != "" {
+					dirString = so.fullPath
+				} else {
+					dirString = so.relativePath
 				}
 
-				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
-				return processIfPassedFilters(filters,
-					newStoredObject(
-						preprocessor,
-						fileInfo.Name(),
-						strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
-						entityType,
-						fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
-						fileInfo.Size(),
-						noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
-						noBlobProps,
-						noMetdata,
-						"", // Local has no such thing as containers
-					),
-					syncProcessor)
+				d, err := os.Open(dirString) // for directories, we don't need a special open with FILE_FLAG_BACKUP_SEMANTICS, because directory opening uses FindFirst which doesn't need that flag. https://blog.differentpla.net/blog/2007/05/25/findfirstfile-and-se_backup_name
+				if err != nil {
+					// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
+					enqueueOutput(parallel.FileSystemEntry{
+						FullPath: dirString,
+						Info:     nil,
+					}, err)
+
+					// Since we have already enqueued the failed enumeration entry, return nil error to avoid duplicate queueing by workerLoop().
+					return nil
+				}
+				defer d.Close()
+
+				// enumerate immediate children
+				for {
+					list, err := r.Readdir(d, 1024) // list it in chunks, so that if we get child dirs early, parallel workers can start working on them
+					if err == io.EOF {
+						if len(list) > 0 {
+							panic("unexpected non-empty list")
+						}
+						return nil
+					} else if err != nil {
+						// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
+						enqueueOutput(parallel.FileSystemEntry{dirString, nil}, err)
+
+						// Since we have already enqueued the failed enumeration entry, return nil error to avoid duplicate queueing by workerLoop().
+						return nil
+					}
+					for _, childInfo := range list {
+						childEntry := parallel.FileSystemEntry{
+							FullPath: filepath.Join(dirString, childInfo.Name()),
+							Info:     childInfo,
+						}
+
+						if failable, ok := childInfo.(parallel.FailableFileInfo); ok && failable.Error() != nil {
+							// while Readdir as a whole did not fail, this particular file info did
+							enqueueOutput(childEntry, failable.Error())
+							continue
+						}
+						isSymlink := childInfo.Mode()&os.ModeSymlink != 0 // for compatibility with filepath.Walk, we do not follow symlinks, but we do enqueue them as output
+						if childInfo.IsDir() && !isSymlink {
+							so := constructStoredObject(childEntry.FullPath, childEntry.Info)
+							enqueueDir(so)
+						}
+						enqueueOutput(childEntry, nil)
+					}
+				}
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB,
+					enumerateOneFileSystemDirectory, constructStoredObject)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB,
+					enumerateOneFileSystemDirectory, constructStoredObject)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath

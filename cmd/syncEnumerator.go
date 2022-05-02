@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync/atomic"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 
@@ -68,7 +69,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			if entityType == common.EEntityType.File() {
 				atomic.AddUint64(&cca.atomicSourceFilesScanned, 1)
 			}
-		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, indexer, tqueue, true, 1)
+		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, indexer, tqueue, true, 1, time.Time{}, cca.cfdMode)
 
 	if err != nil {
 		return nil, err
@@ -90,7 +91,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		if entityType == common.EEntityType.File() {
 			atomic.AddUint64(&cca.atomicDestinationFilesScanned, 1)
 		}
-	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, nil, tqueue, false, 0)
+	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, nil /*folderIndexerMap */, tqueue, false, 0 /* maxObjectIndexerSizeInGB */, cca.lastSyncTime, cca.cfdMode)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +158,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		// when uploading, we can delete remote objects immediately, because as we traverse the remote location
 		// we ALREADY have available a complete map of everything that exists locally
 		// so as soon as we see a remote destination object we can know whether it exists in the local source
-		comparator = newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode).processIfNecessary
+		comparator = newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode, cca.cfdMode, cca.lastSyncTime).processIfNecessary
 		finalize = func() error {
 			// schedule every local file that doesn't exist at the destination
 			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, filters)
@@ -242,4 +243,38 @@ func quitIfInSync(transferJobInitiated, anyDestinationFileDeleted bool, cca *coo
 			return "The source and destination are now in sync."
 		}, common.EExitCode.Success())
 	}
+}
+
+type CFDModeFlags struct {
+	// Change detection flags.
+	TargetCompare bool
+	CtimeMtime    bool
+	Ctime         bool
+	archiveBit    bool
+
+	// MetaDataOnlySync is further optimatization for flags (Ctime, ArchiveBit and TargetCompare).
+	MetaDataOnlySync bool
+}
+
+func processCFDModeFlag(raw *rawSyncCmdArgs) (CFDModeFlags, error) {
+	cfdMode := CFDModeFlags{}
+
+	if raw.MetaDataOnlySync {
+		cfdMode.MetaDataOnlySync = true
+	}
+
+	// Percedences of flags will be (TargetCompare, CtimeMtime, Ctime, ArchiveBit)
+	if raw.cfdModeTargetCompare {
+		cfdMode.TargetCompare = true
+	} else if raw.cfdModeCtimeMtime {
+		cfdMode.CtimeMtime = true
+	} else if raw.cfdModeCtime {
+		cfdMode.Ctime = true
+	} else if raw.cfdModeArchiveBit {
+		cfdMode.archiveBit = true
+	} else {
+		// Default be TargetCompare.
+		cfdMode.TargetCompare = true
+	}
+	return cfdMode, nil
 }

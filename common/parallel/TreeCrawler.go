@@ -22,7 +22,6 @@ package parallel
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -42,9 +41,7 @@ type crawler struct {
 	tqueue                   chan interface{}
 	isSource                 bool
 	root                     Directory
-	directoryMap             map[string]bool
 	maxObjectIndexerSizeInGB uint
-	checkDirectoryUpdates    CheckDirectoryUpdatesFunc
 }
 
 type Directory interface{}
@@ -62,11 +59,9 @@ func (r CrawlResult) Item() (interface{}, error) {
 // must be safe to be simultaneously called by multiple go-routines, each with a different dir
 type EnumerateOneDirFunc func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error
 
-type CheckDirectoryUpdatesFunc func(unChangedDir interface{}, enqueueOutput func(DirectoryEntry, error), root Directory) (Directory, error)
-
 // Crawl crawls an abstract directory tree, using the supplied enumeration function.  May be use for whatever
 // that function can enumerate (i.e. not necessarily a local file system, just anything tree-structured)
-func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getIndexSize func() int64, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, checkDirectoryUpdates CheckDirectoryUpdatesFunc) <-chan CrawlResult {
+func  Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getIndexSize func() int64, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) <-chan CrawlResult {
 	c := &crawler{
 		unstartedDirs:            make([]Directory, 0, 1024),
 		output:                   make(chan CrawlResult, 1000),
@@ -80,7 +75,6 @@ func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, para
 		isSource:                 isSource,
 		root:                     root,
 		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
-		checkDirectoryUpdates:    checkDirectoryUpdates,
 	}
 	if tqueue != nil && !isSource {
 		c.ticketAvailable = 0
@@ -104,7 +98,6 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	go heartbeat()
 
 	if !c.isSource && c.tqueue != nil {
-		c.directoryMap = make(map[string]bool)
 		go c.receiveTqueue(root)
 	} else {
 		c.unstartedDirs = append(c.unstartedDirs, root)
@@ -131,22 +124,6 @@ func (c *crawler) runWorkersToCompletion(ctx context.Context) {
 		}
 	}
 	wg.Wait()
-
-	// Let's enumerate whats left on target not present on source.
-	if !c.isSource && c.tqueue != nil && len(c.directoryMap) > 0 {
-		for ch := range c.directoryMap {
-			if !c.directoryMap[ch] {
-				c.unstartedDirs = append(c.unstartedDirs, ch)
-			} else {
-				delete(c.directoryMap, ch)
-			}
-		}
-		for i := 0; i < c.parallelism; i++ {
-			wg.Add(1)
-			go c.workerLoop(ctx, wg, i, false)
-		}
-		wg.Wait()
-	}
 }
 
 func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerIndex int, autoTune bool) {
@@ -169,26 +146,12 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 
 func (c *crawler) receiveTqueue(root Directory) {
 
-	addOutput := func(de DirectoryEntry, er error) {
-		c.output <- CrawlResult{item: de, err: er}
-	}
-
 	for ch := range c.tqueue {
 		c.cond.L.Lock()
 		c.ticketAvailable += 1
 
-		path, err := c.checkDirectoryUpdates(ch, addOutput, c.root)
-		if err != nil {
-			c.output <- CrawlResult{err: err}
-		}
-
-		if path != nil {
-			c.unstartedDirs = append(c.unstartedDirs, path)
-			if _, ok := c.directoryMap[path.(string)]; ok {
-				delete(c.directoryMap, path.(string))
-			} else {
-				c.directoryMap[path.(string)] = true
-			}
+		if ch != nil {
+			c.unstartedDirs = append(c.unstartedDirs, ch)
 		}
 		c.cond.L.Unlock()
 		c.cond.Broadcast()
@@ -196,7 +159,6 @@ func (c *crawler) receiveTqueue(root Directory) {
 
 	c.cond.L.Lock()
 	c.ticketAvailable += uint(c.parallelism)
-	c.ticketAvailable += uint(len(c.directoryMap))
 	c.cond.L.Unlock()
 	c.cond.Broadcast()
 }
@@ -260,7 +222,7 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	{
 		// wait while there's nothing to do, and another thread might be going to add something
 		for (c.ticketAvailable == 0 && ctx.Err() == nil) || (len(c.unstartedDirs) == 0 && c.dirInProgressCount > 0 && ctx.Err() == nil) {
-			c.cond.Wait() // temporarily relinquish the lock (just on this line only) while we wait for a Signal/Broadcast
+			c.cond.Wait()
 		}
 		c.ticketAvailable--
 		// if we have something to do now, grab it. Else we must be all finished with nothing more to do (ever)
@@ -323,18 +285,8 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	defer c.cond.L.Unlock()
 
 	if c.tqueue != nil && c.isSource {
+		c.tqueue <- toExamine
 		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...)
-	} else {
-		// Sync command and it's target traverser
-		for _, dir := range foundDirectories {
-			result := dir.(string)
-			fmt.Println("foundDirectories: ", dir.(string))
-			if _, ok := c.directoryMap[result]; !ok {
-				c.directoryMap[result] = false
-			} else {
-				delete(c.directoryMap, result)
-			}
-		}
 	}
 
 	c.dirInProgressCount-- // we were doing something, and now we have finished it

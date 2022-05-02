@@ -24,10 +24,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 
@@ -86,7 +87,18 @@ type rawSyncCmdArgs struct {
 	// Provided key name will be fetched from Azure Key Vault and will be used to encrypt the data
 	cpkScopeInfo string
 	// dry run mode bool
-	dryrun              bool
+	dryrun bool
+
+	// CFDMode flags.
+	cfdModeTargetCompare bool
+	cfdModeCtime         bool
+	cfdModeCtimeMtime    bool
+	cfdModeArchiveBit    bool
+
+	// Optimization flag to transfer metaData in case of only metadata change.
+	MetaDataOnlySync bool
+	// lastSyncTime to compare with file/Dir time.
+	lastSyncTime string
 }
 
 func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []string) {
@@ -269,6 +281,18 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 	if err = validatePutMd5(cooked.putMd5, cooked.fromTo); err != nil {
 		return cooked, err
 	}
+	// Process the Sync mode for comparsion.
+	cooked.cfdMode, _ = processCFDModeFlag(raw)
+
+	// Parse lastSyncTime for comparsion.
+	if raw.lastSyncTime != "" {
+		cooked.lastSyncTime, err = parseISO8601(raw.lastSyncTime, true)
+		if err != nil {
+			return cooked, err
+		}
+	} else {
+		cooked.lastSyncTime = time.Time{}
+	}
 
 	err = cooked.md5ValidationOption.Parse(raw.md5ValidationOption)
 	if err != nil {
@@ -347,7 +371,7 @@ type cookedSyncCmdArgs struct {
 
 	source         common.ResourceString
 	destination    common.ResourceString
-        fromTo         common.FromTo
+	fromTo         common.FromTo
 	credentialInfo common.CredentialInfo
 	isHNSToHNS     bool // Because DFS sources and destinations are obscured, this is necessary for folder property transfers on ADLS Gen 2.
 
@@ -407,6 +431,10 @@ type cookedSyncCmdArgs struct {
 	mirrorMode bool
 
 	dryrunMode bool
+
+	cfdMode CFDModeFlags
+
+	lastSyncTime time.Time
 }
 
 func (cca *cookedSyncCmdArgs) incrementDeletionCount() {
@@ -768,6 +796,19 @@ func init() {
 	syncCmd.PersistentFlags().StringVar(&raw.legacyExclude, "exclude", "", "Legacy exclude param. DO NOT USE")
 	syncCmd.PersistentFlags().MarkHidden("include")
 	syncCmd.PersistentFlags().MarkHidden("exclude")
+
+	// Changed file detetction mode.
+	// TODO: These can be merged to one argument with different values like CTIME, CTIMEMTIME, TARGET, ARCHIVERBIT. In that way user can only input one value.
+	syncCmd.PersistentFlags().BoolVar(&raw.cfdModeCtime, "cfdModeCtime", false, "Include only files where ctime of file more than lastSync time.")
+	syncCmd.PersistentFlags().BoolVar(&raw.cfdModeCtimeMtime, "cfdModeCtimeMtime", false, "Include only files where ctime or mtime of file more than lastSync time.")
+	syncCmd.PersistentFlags().BoolVar(&raw.cfdModeTargetCompare, "cfdModeTargetCompare", false, "Default sync comparsion where target enumerated for each file. It's least optimized, but gurantee no data loss.")
+	syncCmd.PersistentFlags().BoolVar(&raw.cfdModeArchiveBit, "cfdModeArchiveBit", false, "Include only files where archiveBit of file not set.")
+
+	// Optimization for metaData only copy case.
+	syncCmd.PersistentFlags().BoolVar(&raw.MetaDataOnlySync, "MetaDataOnlySync", false, "Optimization to transfer only metaData in case of metadata change only.")
+
+	// Time from which file change detection done.
+	syncCmd.PersistentFlags().StringVar(&raw.lastSyncTime, "lastSyncTime", "", "Include files modified after lastSyncTime.")
 
 	// TODO follow sym link is not implemented, clarify behavior first
 	//syncCmd.PersistentFlags().BoolVar(&raw.followSymlinks, "follow-symlinks", false, "follow symbolic links when performing sync from local file system.")

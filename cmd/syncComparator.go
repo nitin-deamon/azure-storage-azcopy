@@ -45,10 +45,77 @@ type syncDestinationComparator struct {
 	sourceFolderIndex *folderIndexer
 
 	disableComparison bool
+
+	CFDMode CFDModeFlags
+
+	lastSync time.Time
 }
 
-func newSyncDestinationComparator(i *folderIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool) *syncDestinationComparator {
-	return &syncDestinationComparator{sourceFolderIndex: i, copyTransferScheduler: copyScheduler, destinationCleaner: cleaner, disableComparison: disableComparison}
+func newSyncDestinationComparator(i *folderIndexer, copyScheduler, cleaner objectProcessor, disableComparison bool, cfdMode CFDModeFlags, lastSyncTime time.Time) *syncDestinationComparator {
+	return &syncDestinationComparator{sourceFolderIndex: i, copyTransferScheduler: copyScheduler, destinationCleaner: cleaner, disableComparison: disableComparison,
+		CFDMode:  cfdMode,
+		lastSync: lastSyncTime}
+}
+
+// HasFileChangedSinceLastSyncUsingLocalChecks depending on mode returns dataChanged and metadataChanged.
+// Given a file and the corresponding scanned source object, find out if we need to copy data, metadata, both, none.
+// This is called by TargetTraverser. It honours various sync qualifiers to make the decision, f.e., if sync
+// qualifiers allow ctime/mtime to be used for CFD it may not need to query file attributes from target.
+//
+// Note: Caller will use the returned information to decide whether to copy the storedObject to target and whether to
+// 		 copy only data, only metadata or both.
+//
+// Note: This SHOULD NOT be called for children of "changed" directories, since for changed directories we cannot safely
+// 	     check for changed files purely by doing time based comparison. Use HasFileChangedSinceLastSyncUsingTargetCompare()
+// 		 for children of changed directories.
+func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(so StoredObject, filePath string) (bool, bool) {
+	// Changed file detection using Ctime and Mtime.
+	if f.CFDMode.CtimeMtime {
+		// File Mtime changed, which means data changed and it cause metadata change.
+		if so.lastModifiedTime.After(f.lastSync) {
+			return true, true
+		} else if so.lastChangeTime.After(f.lastSync) {
+			// File Ctime changed only, only meta data changed.
+			return false, true
+		}
+		// File not changed at all.
+		return false, false
+	} else if f.CFDMode.Ctime {
+		// Changed file detection using Ctime only.
+
+		// File changed since lastSync time. CFDMode is Ctime, so we can't rely on mtime as it can be modified by any other tool.
+		if so.lastChangeTime.After(f.lastSync) {
+			// If MetaDataSync Flag is false we don't need to check for data or metadata change. We can return true in that case.
+			if !f.CFDMode.MetaDataOnlySync {
+				return true, true
+			} else {
+				// TODO: If MetaDataSync Flag is true, we need to check for data or metadata change.
+				// 		 We need to get file properties to know what changed.
+				return true, true
+			}
+		} else {
+			// File Ctime not changed, means no data or metadata changed.
+			return false, false
+		}
+	} else if f.CFDMode.archiveBit {
+		if so.archiveBit {
+			return false, false
+		} else {
+			// File modified case.
+
+			// If MetaDataSync Flag is false we don't need to check for data or metadata change. We can return true in that case.
+			if !f.CFDMode.MetaDataOnlySync {
+				return true, true
+			} else {
+				// TODO: If MetaDataSync Flag is true, we need to check for data or metadata change.
+				// 		 We need to get file properties to know what changed.
+				return true, true
+			}
+		}
+	} else {
+		
+	}
+	return false, false
 }
 
 // it will only schedule transfers for destination objects that are present in the indexer but stale compared to the entry in the map
@@ -97,38 +164,26 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		f.sourceFolderIndex.lock.Unlock()
 	}()
 
+	fmt.Printf("Folder: %s, File: %s\n", lcFolderName, lcFileName)
 	// Folder Case
 	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
-		// Folder not present on target side.
-		if (destinationObject.lastModifiedTime == time.Time{}) {
-			// As source enumerate the folder and add files to map. After enumeration done, source queue folder information to target.
-			// So in any case folder should be present in map.
+		if destinationObject.isFolderEndMarker {
 			if !folderPresent {
-				fmt.Printf("lcFolderName: %s, lcFileName: %s", lcFolderName, lcFileName)
-				panic("Target Enumeration has directory which is not present in source.")
+				return nil
 			}
-			// We know this folder not exist on target, lets create job order for it.
-			for ch := range foldermap.indexMap {
-				f.copyTransferScheduler(foldermap.indexMap[ch])
-				delete(foldermap.indexMap, ch)
-			}
+			for file := range foldermap.indexMap {
+				storedObject := foldermap.indexMap[file]
+				delete(foldermap.indexMap, file)
 
-			f.sourceFolderIndex.counter = f.sourceFolderIndex.counter - int64(f.sourceFolderIndex.folderMap[lcFolderName].counter)
-
-			return nil
-		} else if !destinationObject.hasEntityUpdated {
-			if !folderPresent {
-				panic("Target Enumeration has directory which is not present in source.")
-			}
-			for ch := range foldermap.indexMap {
-				fmt.Println("File: ", ch)
-				if foldermap.indexMap[ch].hasEntityUpdated && foldermap.indexMap[ch].entityType == common.EEntityType.File() {
-					f.copyTransferScheduler(foldermap.indexMap[ch])
+				metaChange, dataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
+				if dataChange {
+					f.copyTransferScheduler(storedObject)
 				}
-				delete(foldermap.indexMap, ch)
-			}
+				if metaChange {
+					// TODO: Add calls to just update meta data of file.
+				}
 
-			f.sourceFolderIndex.counter = f.sourceFolderIndex.counter - int64(f.sourceFolderIndex.folderMap[lcFolderName].counter)
+			}
 			return nil
 		} else {
 			// Lets create folder on target side.
@@ -142,6 +197,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 				}
 			} else {
 				// Folder Deletion not enabled on azcopy. So its no-op only.
+				// TODO: Need to add call to delete the folder.
 				_ = f.destinationCleaner(destinationObject)
 			}
 			return nil
@@ -164,6 +220,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 			_ = f.destinationCleaner(destinationObject)
 		}
 	} else {
+		// TODO: Need to add the delete code which distinquish between blob and file.
 		_ = f.destinationCleaner(destinationObject)
 	}
 

@@ -230,7 +230,7 @@ func (t *fileTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
 
-	cCrawled := parallel.Crawl(workerContext, directoryURL, enumerateOneDir, parallelism, nil, nil, false, 0, nil)
+	cCrawled := parallel.Crawl(workerContext, directoryURL, enumerateOneDir, parallelism, nil, nil, false, 0)
 
 	cTransformed := parallel.Transform(workerContext, cCrawled, convertToStoredObject, parallelism)
 

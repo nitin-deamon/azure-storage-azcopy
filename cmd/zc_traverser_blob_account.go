@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 
@@ -102,7 +103,9 @@ func (t *blobAccountTraverser) Traverse(preprocessor objectMorpher, processor ob
 	for _, v := range cList {
 		containerURL := t.accountURL.NewContainerURL(v).URL()
 		containerTraverser := newBlobTraverser(&containerURL, t.p, t.ctx, true,
-			t.includeDirectoryStubs, t.incrementEnumerationCounter, t.s2sPreserveSourceTags, t.cpkOptions, nil, nil, false, 0)
+			t.includeDirectoryStubs, t.incrementEnumerationCounter, t.s2sPreserveSourceTags, t.cpkOptions,
+			nil /* folderIndexer */, nil, /* tqueue*/
+			false /* isSource */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 
 		preprocessorForThisChild := preprocessor.FollowedBy(newContainerDecorator(v))
 
