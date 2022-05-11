@@ -224,7 +224,7 @@ func (cooked cookedListCmdArgs) HandleListContainerCommand() (err error) {
 		true, false, false, func(common.EntityType) {},
 		nil, false, pipeline2.LogNone, common.CpkOptions{}, nil, /* errorChannel */
 		nil /* folderIndexer */, nil, /* tqueue*/
-		false /* isSource */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
+		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 
 	if err != nil {
 		return fmt.Errorf("failed to initialize traverser: %s", err.Error())

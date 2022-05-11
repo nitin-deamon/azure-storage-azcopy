@@ -57,17 +57,14 @@ type blobTraverser struct {
 
 	cpkOptions common.CpkOptions
 
-	indexerMap *folderIndexer
-
-	tqueue chan interface{}
-
-	isSource bool
-
+	// Fields applicable only to sync operation.
+	isSync                   bool
+	indexerMap               *folderIndexer
+	tqueue                   chan interface{}
+	isSource                 bool
 	maxObjectIndexerSizeInGB uint
-
-	lastSync time.Time
-
-	cfdMode CFDModeFlags
+	lastSync                 time.Time
+	cfdMode                  CFDModeFlags
 }
 
 func (t *blobTraverser) IsDirectory(isSource bool) bool {
@@ -272,15 +269,15 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		so := dir.(StoredObject)
 		currentDirPath := so.relativePath
 
-		// Check the directory if we need enumeration at target side or not.
-		if t.tqueue != nil && !t.isSource && !t.HasDirectoryChangedSinceLastSync(so) {
-			goto Finalize
-		}
-
 		// This is applicable for only sync mode as source local give path without forward slash.
 		// TODO: Need to modify the source(Local) traverser to add forward slash.
 		if t.tqueue != nil && !t.isSource && currentDirPath != "" {
 			currentDirPath = currentDirPath + "/"
+		}
+
+		// Check the directory if we need enumeration at target side or not.
+		if t.tqueue != nil && !t.isSource && !t.HasDirectoryChangedSinceLastSync(so) {
+			goto FinalizeDirectory
 		}
 
 		for marker := (azblob.Marker{}); marker.NotDone(); {
@@ -376,7 +373,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			marker = lResp.NextMarker
 		}
 
-	Finalize:
+	FinalizeDirectory:
 		// This storedObject marks the end of folder enumeration.
 		storedObject := StoredObject{
 			name:              getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
@@ -392,8 +389,16 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		return nil
 	}
 
+	//
+	// This is used by the source traverser to find the indexer map size.
+	// It uses it to induce a wait before starting enumeration of a new directory, to keep indexer map size in check.
+	//
 	getIndexerMapSize := func() int64 {
-		if t.indexerMap != nil {
+		if t.isSource && t.tqueue != nil {
+			if t.indexerMap == nil {
+				panic("Source traverser must have indexerMap set!")
+
+			}
 			return t.indexerMap.getIndexerMapSize()
 		} else {
 			return -1
@@ -402,7 +407,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 
 	for x := range cCrawled {
 		item, workerError := x.Item()
@@ -506,7 +511,7 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 }
 
 func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
-	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, lastSync time.Time,
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, lastSync time.Time,
 	cfdMode CFDModeFlags) (t *blobTraverser) {
 	t = &blobTraverser{
 		rawURL:                      rawURL,
@@ -519,6 +524,7 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		s2sPreserveSourceTags:       s2sPreserveSourceTags,
 		cpkOptions:                  cpkOptions,
 		indexerMap:                  indexerMap,
+		isSync:                      isSync,
 		tqueue:                      tqueue,
 		isSource:                    isSource,
 		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,

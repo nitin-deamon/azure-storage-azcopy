@@ -45,9 +45,12 @@ type localTraverser struct {
 	// a generic function to notify that a new stored object has been enumerated
 	incrementEnumerationCounter enumerationCounterFunc
 	errorChannel                chan ErrorFileInfo
-	tqueue                      chan interface{}
-	isSource                    bool
-	maxObjectIndexerSizeInGB    uint
+
+	// Field applicable to only sync operation.
+	isSync                   bool
+	tqueue                   chan interface{}
+	isSource                 bool
+	maxObjectIndexerSizeInGB uint
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -185,7 +188,7 @@ func (s symlinkTargetFileInfo) Name() string {
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
 func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
-	tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, enumerateOneFileSystemDirectory parallel.EnumerateOneDir, constructStoredObject parallel.StoredObjectFunc) (err error) {
+	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, enumerateOneFileSystemDirectory parallel.EnumerateOneDir, constructStoredObject parallel.StoredObjectFunc) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -364,7 +367,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel
 					return nil
 				}
 			}
-		}, enumerateOneFileSystemDirectory, constructStoredObject, getIndexerMapSize, tqueue, isSource, maxObjectIndexerSizeInGB)
+		}, enumerateOneFileSystemDirectory, constructStoredObject, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -431,7 +434,6 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					noMetdata,
 					"", // Local has no such thing as containers
 				)
-				so.fullPath = filePath
 				return so
 			}
 
@@ -475,12 +477,8 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 				var dirString string
 				so := dir.(StoredObject)
 
-				if so.fullPath != "" {
-					dirString = so.fullPath
-				} else {
-					dirString = so.relativePath
-				}
-
+				dirString = path.Join(t.fullPath, so.relativePath)
+				fmt.Println("Path: ", dirString)
 				d, err := os.Open(dirString) // for directories, we don't need a special open with FILE_FLAG_BACKUP_SEMANTICS, because directory opening uses FindFirst which doesn't need that flag. https://blog.differentpla.net/blog/2007/05/25/findfirstfile-and-se_backup_name
 				if err != nil {
 					// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
@@ -532,10 +530,10 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB,
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB,
 					enumerateOneFileSystemDirectory, constructStoredObject)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.maxObjectIndexerSizeInGB,
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB,
 					enumerateOneFileSystemDirectory, constructStoredObject)
 			}
 		} else {
@@ -616,7 +614,7 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 }
 
 func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
-	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint) *localTraverser {
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) *localTraverser {
 	traverser := localTraverser{
 		fullPath:                    cleanLocalPath(fullPath),
 		recursive:                   recursive,
@@ -625,6 +623,7 @@ func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, fo
 		indexerMap:                  indexerMap,
 		incrementEnumerationCounter: incrementEnumerationCounter,
 		errorChannel:                errorChannel,
+		isSync:                      isSync,
 		tqueue:                      tqueue,
 		isSource:                    isSource,
 		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,

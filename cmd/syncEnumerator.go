@@ -56,9 +56,35 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		}
 	}
 
-	tqueue := make(chan interface{}, 1000)
-	// set up the comparator so that the source/destination can be compared
-	indexer := newfolderIndexer()
+	//
+	// tqueue (Target Traverser Queue) will hold the directories that the Target Traverser
+	// should enumerate. As Source Traverser scans the source it adds "fully enumerated"
+	// directories to tqueue and Target Traverser dequeues from tqueue and processes the
+	// dequeued directories. Both Source and Target traversers need tqueue we pass it to both.
+	// Some important points to know:
+	//
+	// 1. Source Traverser will add a directory to tqueue only after it fully enumerates
+	//    the directory (i.e., its direct children). It'll also add all the directory's direct
+	//    children (with their attributes) in the indexer. This means that Target Traverser
+	//    can be sure that whatever directory it processes from tqueue, all the directory's
+	//    direct children are present in the indexer for change detection.
+	// 2. Depending on the CFDMode (change file detection mode) in use if Target Traverser
+	//    detects that a directory has not changed since last sync, it will not enumerate
+	//    the directory.
+	//
+	// We want maxObjectIndexerSizeInGB to solely control how fast the Source Traverser
+	// scans before it's made to block to let Target Traverser catch up. Since Source
+	// Traverser will block when tqueue is full we want tqueue to be large enough to not
+	// fill before the indexer size hits maxObjectIndexerSizeInGB. Assuming a practical
+	// file/dir ratio of 20:1 and max sync window of say 20 million files, we use
+	// 1 million as the channel size.
+	//
+	// TODO: See how it performs with experimentation on real workloads.
+	// TODO: See if we can make this a function of maxObjectIndexerSizeInGB
+	tqueue := make(chan interface{}, 1000*1000)
+
+	// set up the map, so that the source/destination can be compared
+	objectIndexerMap := newfolderIndexer()
 
 	// TODO: enable symlink support in a future release after evaluating the implications
 	// TODO: Consider passing an errorChannel so that enumeration errors during sync can be conveyed to the caller.
@@ -69,7 +95,8 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			if entityType == common.EEntityType.File() {
 				atomic.AddUint64(&cca.atomicSourceFilesScanned, 1)
 			}
-		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, indexer, tqueue, true, 1, time.Time{}, cca.cfdMode)
+		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, objectIndexerMap, tqueue, true /* isSource */, true /* isSync */, 1,
+		time.Time{} /* lastSyncTime (not used by source traverser) */, cca.cfdMode)
 
 	if err != nil {
 		return nil, err
@@ -91,7 +118,8 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		if entityType == common.EEntityType.File() {
 			atomic.AddUint64(&cca.atomicDestinationFilesScanned, 1)
 		}
-	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, nil /*folderIndexerMap */, tqueue, false, 0 /* maxObjectIndexerSizeInGB */, cca.lastSyncTime, cca.cfdMode)
+	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions,
+		nil /* errorChannel */, nil /*folderIndexerMap */, tqueue, false /* isSource */, true /* isSync */, 0 /* maxObjectIndexerSizeInGB (not used by destination traverse) */, cca.lastSyncTime /* lastSyncTime */, cca.cfdMode)
 	if err != nil {
 		return nil, err
 	}
@@ -158,10 +186,10 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		// when uploading, we can delete remote objects immediately, because as we traverse the remote location
 		// we ALREADY have available a complete map of everything that exists locally
 		// so as soon as we see a remote destination object we can know whether it exists in the local source
-		comparator = newSyncDestinationComparator(indexer, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode, cca.cfdMode, cca.lastSyncTime).processIfNecessary
+		comparator = newSyncDestinationComparator(objectIndexerMap, transferScheduler.scheduleCopyTransfer, destCleanerFunc, cca.mirrorMode, cca.cfdMode, cca.lastSyncTime).processIfNecessary
 		finalize = func() error {
 			// schedule every local file that doesn't exist at the destination
-			err = indexer.traverse(transferScheduler.scheduleCopyTransfer, filters)
+			err = objectIndexerMap.traverse(transferScheduler.scheduleCopyTransfer, filters)
 			if err != nil {
 				return err
 			}
@@ -177,12 +205,12 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(sourceTraverser, destinationTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(sourceTraverser, destinationTraverser, objectIndexerMap, filters, comparator, finalize), nil
 	default:
-		indexer.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
+		objectIndexerMap.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
 		// in all other cases (download and S2S), the destination is scanned/indexed first
 		// then the source is scanned and filtered based on what the destination contains
-		comparator = newSyncSourceComparator(indexer, transferScheduler.scheduleCopyTransfer, cca.mirrorMode).processIfNecessary
+		comparator = newSyncSourceComparator(objectIndexerMap, transferScheduler.scheduleCopyTransfer, cca.mirrorMode).processIfNecessary
 
 		finalize = func() error {
 			// remove the extra files at the destination that were not present at the source
@@ -200,7 +228,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 				deleteScheduler = newFpoAwareProcessor(fpo, newSyncLocalDeleteProcessor(cca).removeImmediately)
 			}
 
-			err = indexer.traverse(deleteScheduler, nil)
+			err = objectIndexerMap.traverse(deleteScheduler, nil)
 			if err != nil {
 				return err
 			}
@@ -218,7 +246,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(destinationTraverser, sourceTraverser, indexer, filters, comparator, finalize), nil
+		return newSyncEnumerator(destinationTraverser, sourceTraverser, objectIndexerMap, filters, comparator, finalize), nil
 	}
 }
 

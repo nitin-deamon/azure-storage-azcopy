@@ -22,6 +22,7 @@ package cmd
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -113,9 +114,9 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 			}
 		}
 	} else {
-		
+
 	}
-	return false, false
+	return true, true
 }
 
 // it will only schedule transfers for destination objects that are present in the indexer but stale compared to the entry in the map
@@ -134,19 +135,13 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		lcRelativePath = destinationObject.relativePath
 	}
 
-	lcFolderName = filepath.Dir(destinationObject.relativePath)
-	lcFileName = filepath.Base(destinationObject.relativePath)
-	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
-		lcFolderName = lcRelativePath
-		lcFileName = ""
-	}
+	lcFolderName = filepath.Dir(lcRelativePath)
+	lcFileName = filepath.Base(lcRelativePath)
 
 	f.sourceFolderIndex.lock.Lock()
-
-	if lcFolderName == "" {
-		lcFolderName = "."
+	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
+		lcFolderName = path.Join(lcFolderName, lcFileName)
 	}
-
 	foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
 
 	// Do the auditing of map.
@@ -168,9 +163,11 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	// Folder Case
 	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
 		if destinationObject.isFolderEndMarker {
+
 			if !folderPresent {
 				return nil
 			}
+
 			for file := range foldermap.indexMap {
 				storedObject := foldermap.indexMap[file]
 				delete(foldermap.indexMap, file)
@@ -182,8 +179,8 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 				if metaChange {
 					// TODO: Add calls to just update meta data of file.
 				}
-
 			}
+
 			return nil
 		} else {
 			// Lets create folder on target side.

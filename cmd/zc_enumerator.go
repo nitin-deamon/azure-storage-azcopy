@@ -101,8 +101,6 @@ type StoredObject struct {
 	// since last sync. So whenever backup or any copy tool do the copy, it set the archiveBit.
 	// Whenever file is modified by application resets the archiveBit.
 	archiveBit bool
-
-	fullPath string
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
@@ -333,7 +331,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
 	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
-	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, maxObjectIndexerSizeInGB uint, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
@@ -402,7 +400,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {
 			// TODO: Need to add lastSyncTime, CFDModeFlags for (Cloud to local) sync operation.
-			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue, isSource, maxObjectIndexerSizeInGB)
+			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 		}
 	case common.ELocation.Benchmark():
 		ben, err := newBenchmarkTraverser(resource.Value, incrementEnumerationCounter)
@@ -436,7 +434,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 			output = newBlobVersionsTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, listOfVersionIds, cpkOptions)
 		} else {
 			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions, indexerMap,
-				tqueue, isSource, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
+				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
 		}
 	case common.ELocation.File():
 		resourceURL, err := resource.FullURL()
@@ -685,17 +683,17 @@ func (e *syncEnumerator) enumerate() (err error) {
 		return
 	}
 
-	if len(e.objectIndexer.folderMap) > 0 {
-		fmt.Println("Still Entries left")
-		for folder := range e.objectIndexer.folderMap {
-			fmt.Println("Folder", folder)
-			for ch := range e.objectIndexer.folderMap[folder].indexMap {
-				fmt.Println("File", ch)
-			}
-		}
-	} else {
-		fmt.Println("Hurray everything empty")
-	}
+	// if len(e.objectIndexer.folderMap) > 0 {
+	// 	fmt.Println("Still Entries left")
+	// 	for folder := range e.objectIndexer.folderMap {
+	// 		fmt.Println("Folder", folder)
+	// 		for ch := range e.objectIndexer.folderMap[folder].indexMap {
+	// 			fmt.Println("File", ch)
+	// 		}
+	// 	}
+	// } else {
+	// 	fmt.Println("Hurray everything empty")
+	// }
 	// execute the finalize func which may perform useful clean up steps
 	err = e.finalize()
 	if err != nil {
