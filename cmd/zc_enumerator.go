@@ -47,12 +47,16 @@ import (
 // we can add more properties if needed, as this is easily extensible
 // ** DO NOT instantiate directly, always use newStoredObject ** (to make sure its fully populated and any preprocessor method runs)
 type StoredObject struct {
-	name             string
-	entityType       common.EntityType
+	name       string
+	entityType common.EntityType
+
 	lastModifiedTime time.Time
-	size             int64
-	md5              []byte
-	blobType         azblob.BlobType // will be "None" when unknown or not applicable
+
+	lastChangeTime time.Time
+
+	size     int64
+	md5      []byte
+	blobType azblob.BlobType // will be "None" when unknown or not applicable
 
 	// all of these will be empty when unknown or not applicable.
 	contentDisposition string
@@ -86,10 +90,28 @@ type StoredObject struct {
 	leaseState    azblob.LeaseStateType
 	leaseStatus   azblob.LeaseStatusType
 	leaseDuration azblob.LeaseDurationType
+
+	// Incase of blob intermediate directory stub marked as virtual directory.
+	isVirtualFolder bool
+
+	// This flag set once folder enumeration done.
+	isFolderEndMarker bool
+
+	// Archivebit for windows case, which is more reliable to know if file changed
+	// since last sync. So whenever backup or any copy tool do the copy, it set the archiveBit.
+	// Whenever file is modified by application resets the archiveBit.
+	archiveBit bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
 	return s.lastModifiedTime.After(storedObject2.lastModifiedTime)
+}
+
+func (s *StoredObject) isNeedToCopy(storedObject2 StoredObject) bool {
+	if s.lastModifiedTime.After(storedObject2.lastModifiedTime) || s.lastChangeTime.After(storedObject2.lastChangeTime) {
+		return true
+	}
+	return false
 }
 
 func (s *StoredObject) isSingleSourceFile() bool {
@@ -303,17 +325,19 @@ type enumerationCounterFunc func(entityType common.EntityType)
 // errorOnDirWOutRecursive is used by copy.
 // If errorChannel is non-nil, all errors encountered during enumeration will be conveyed through this channel.
 // To avoid slowdowns, use a buffered channel of enough capacity.
-
+// tqueue is required in case of sync, maxObjectIndexerSizeInGB for auto pacing.
+// lastSyncTime and CFDModeFlags for change detection.
 func InitResourceTraverser(resource common.ResourceString, location common.Location, ctx *context.Context,
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
-	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo) (ResourceTraverser, error) {
+	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
 	// Clean up the resource if it's a local path
 	if location == common.ELocation.Local() {
-		resource = common.ResourceString{Value: cleanLocalPath(resource.ValueLocal())}
+		resource = common.ResourceString{Value: common.CleanLocalPath(resource.ValueLocal())}
 	}
 
 	// Initialize the pipeline if creds and ctx is provided
@@ -371,11 +395,12 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				}
 			}()
 
-			baseResource := resource.CloneWithValue(cleanLocalPath(basePath))
+			baseResource := resource.CloneWithValue(common.CleanLocalPath(basePath))
 			output = newListTraverser(baseResource, location, nil, nil, recursive, toFollow, getProperties,
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {
-			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel)
+			// TODO: Need to add lastSyncTime, CFDModeFlags for (Cloud to local) sync operation.
+			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 		}
 	case common.ELocation.Benchmark():
 		ben, err := newBenchmarkTraverser(resource.Value, incrementEnumerationCounter)
@@ -408,7 +433,8 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 		} else if listOfVersionIds != nil {
 			output = newBlobVersionsTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, listOfVersionIds, cpkOptions)
 		} else {
-			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions)
+			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions, indexerMap,
+				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
 		}
 	case common.ELocation.File():
 		resourceURL, err := resource.FullURL()
@@ -593,7 +619,7 @@ type syncEnumerator struct {
 	secondaryTraverser ResourceTraverser
 
 	// the results from the primary traverser would be stored here
-	objectIndexer *objectIndexer
+	objectIndexer *folderIndexer
 
 	// general filters apply to both the primary and secondary traverser
 	filters []ObjectFilter
@@ -607,7 +633,7 @@ type syncEnumerator struct {
 	finalize func() error
 }
 
-func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *objectIndexer,
+func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *folderIndexer,
 	filters []ObjectFilter, comparator objectProcessor, finalize func() error) *syncEnumerator {
 	return &syncEnumerator{
 		primaryTraverser:   primaryTraverser,
@@ -621,20 +647,53 @@ func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, i
 
 func (e *syncEnumerator) enumerate() (err error) {
 	// enumerate the primary resource and build lookup map
-	err = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
-	if err != nil {
+	var wg sync.WaitGroup
+	var perr, serr error
+
+	wg.Add(1)
+	// Start the source traverser.
+	go func() {
+		defer wg.Done()
+		perr = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
 		return
-	}
+	}()
 
 	// enumerate the secondary resource and as the objects pass the filters
 	// they will be passed to the object comparator
 	// which can process given objects based on what's already indexed
 	// note: transferring can start while scanning is ongoing
-	err = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
-	if err != nil {
+
+	wg.Add(1)
+	// Start the target traverser.
+	go func() {
+		defer wg.Done()
+		serr = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
+		return
+	}()
+
+	wg.Wait()
+
+	if perr != nil {
+		err = perr
 		return
 	}
 
+	if serr != nil {
+		err = serr
+		return
+	}
+
+	// if len(e.objectIndexer.folderMap) > 0 {
+	// 	fmt.Println("Still Entries left")
+	// 	for folder := range e.objectIndexer.folderMap {
+	// 		fmt.Println("Folder", folder)
+	// 		for ch := range e.objectIndexer.folderMap[folder].indexMap {
+	// 			fmt.Println("File", ch)
+	// 		}
+	// 	}
+	// } else {
+	// 	fmt.Println("Hurray everything empty")
+	// }
 	// execute the finalize func which may perform useful clean up steps
 	err = e.finalize()
 	if err != nil {

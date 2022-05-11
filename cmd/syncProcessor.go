@@ -24,16 +24,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Azure/azure-pipeline-go/pipeline"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
-	"github.com/Azure/azure-storage-blob-go/azblob"
-	"github.com/Azure/azure-storage-file-go/azfile"
 	"net/url"
 	"os"
 	"path"
 	"runtime"
 	"strings"
+
+	"github.com/Azure/azure-pipeline-go/pipeline"
+	"github.com/Azure/azure-storage-blob-go/azblob"
+	"github.com/Azure/azure-storage-file-go/azfile"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/ste"
 )
 
 // extract the right info from cooked arguments and instantiate a generic copy transfer processor from it
@@ -283,7 +284,6 @@ func newRemoteResourceDeleter(rawRootURL *url.URL, p pipeline.Pipeline, ctx cont
 func (b *remoteResourceDeleter) delete(object StoredObject) error {
 	if object.entityType == common.EEntityType.File() {
 		// TODO: use b.targetLocation.String() in the next line, instead of "object", if we can make it come out as string
-		glcm.Info("Deleting extra object: " + object.relativePath)
 		switch b.targetLocation {
 		case common.ELocation.Blob():
 			blobURLParts := azblob.NewBlobURLParts(*b.rootURL)

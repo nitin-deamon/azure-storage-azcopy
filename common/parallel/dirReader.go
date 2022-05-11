@@ -81,7 +81,7 @@ func (_ defaultDirReader) Close() {
 type linuxDirEntry struct {
 	parentDir *os.File
 	name      string
-	resultCh  chan failableFileInfo
+	resultCh  chan FailableFileInfo
 }
 
 type linuxDirReader struct {
@@ -109,7 +109,7 @@ func (r linuxDirReader) doReaddir(dir *os.File, n int, timeout time.Duration) ([
 	}
 
 	// enqueue the LStatting
-	resCh := make(chan failableFileInfo, len(names)) // big enough that it will never get full and cause deadlocks
+	resCh := make(chan FailableFileInfo, len(names)) // big enough that it will never get full and cause deadlocks
 	for _, n := range names {
 		r.ch <- linuxDirEntry{
 			parentDir: dir,
