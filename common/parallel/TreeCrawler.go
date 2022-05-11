@@ -24,6 +24,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 )
 
 type crawler struct {
@@ -174,7 +176,6 @@ func (c *crawler) receiveTqueue(root Directory) {
 const SizeInGB = 1024 * 1024 * 1024
 
 func (c *crawler) autoPacerWait(ctx context.Context) {
-
 	// Return in case its not sync operation.
 	if !c.isSync {
 		return
@@ -316,7 +317,14 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 		if c.tqueue == nil {
 			panic("Source traverser has nil tqueue!")
 		}
-		c.tqueue <- toExamine
+		if _, ok := toExamine.(string); ok {
+			if _, ok := c.root.(string); ok {
+				c.tqueue <- common.RelativePath(toExamine.(string), c.root.(string))
+			}
+		} else {
+			panic("toExamine not string type")
+		}
+
 		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...)
 	}
 

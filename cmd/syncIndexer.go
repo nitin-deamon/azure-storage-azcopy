@@ -22,12 +22,14 @@ package cmd
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/pkg/errors"
 )
 
@@ -61,7 +63,10 @@ func newfolderIndexer() *folderIndexer {
 }
 
 func storedObjectSize(so StoredObject) int64 {
-	return int64(unsafe.Sizeof(StoredObject{}) + unsafe.Sizeof(so.name) + unsafe.Sizeof(so.relativePath))
+	return int64(unsafe.Sizeof(StoredObject{}) + unsafe.Sizeof(so.name) + unsafe.Sizeof(so.relativePath) +
+		unsafe.Sizeof(so.contentDisposition) + unsafe.Sizeof(so.cacheControl) + unsafe.Sizeof(so.contentLanguage) +
+		unsafe.Sizeof(so.contentEncoding) + unsafe.Sizeof(so.contentType) + unsafe.Sizeof(so.ContainerName) +
+		unsafe.Sizeof(so.DstContainerName))
 }
 
 // process the given stored object by indexing it using its relative path
@@ -95,6 +100,17 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 		}
 	}
 
+	if lcRelativePath != "" {
+		// Why we need to this because folder storedObject get deleted as parent enumeration only exception to this root folder.
+		if storedObject.isVirtualFolder || storedObject.entityType == common.EEntityType.Folder() {
+			lcFolderName = path.Join(lcFolderName, lcFileName)
+			if _, ok := i.folderMap[lcFolderName]; !ok {
+				i.folderMap[lcFolderName] = newObjectIndexer()
+				i.folderMap[lcFolderName].folderObject = storedObject
+			}
+		}
+	}
+
 	i.counter += 1
 	i.folderMap[lcFolderName].counter += 1
 	atomic.AddInt64(&i.totalSize, size)
@@ -107,21 +123,39 @@ func (i *folderIndexer) getIndexerMapSize() int64 {
 	return atomic.LoadInt64(&i.totalSize)
 }
 
-func (i *folderIndexer) getStoredObject(lcRelativePath string) StoredObject {
+func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
+	var lcRelativePath string
+	if i.isDestinationCaseInsensitive {
+		lcRelativePath = strings.ToLower(relativePath)
+	} else {
+		lcRelativePath = relativePath
+	}
 	lcFolderName := filepath.Dir(lcRelativePath)
 	lcFileName := filepath.Base(lcRelativePath)
 	i.lock.RLock()
-	if folderMap, ok := i.folderMap[lcFolderName]; ok {
-		if so, ok := folderMap.indexMap[lcFileName]; ok {
-			return so
+	defer i.lock.RUnlock()
+	if lcRelativePath == "" {
+		if folderMap, ok := i.folderMap[lcFolderName]; ok {
+			if so, ok := folderMap.indexMap[lcFileName]; ok {
+				return so
+			}
 		}
+		panic(fmt.Sprintf("Stored Object for relative path[%s] not found", lcRelativePath))
+	} else {
+		folderName := path.Join(lcFolderName, lcFileName)
+		if foldermap, ok := i.folderMap[folderName]; ok {
+			return foldermap.folderObject
+		}
+		panic(fmt.Sprintf("Stored Object for relative path[%s] not found", lcRelativePath))
 	}
-	i.lock.RUnlock()
-	panic(fmt.Sprintf("Stored Object for relative path[%s] not found", lcRelativePath))
 }
 
 // go through the remaining stored objects in the map to process them
 func (i *folderIndexer) traverse(processor objectProcessor, filters []ObjectFilter) (err error) {
+	if atomic.LoadInt64(&i.totalSize) != 0 {
+		panic("Total Size should be zero.")
+	}
+
 	for _, folder := range i.folderMap {
 		for _, value := range folder.indexMap {
 			fmt.Printf("\n File with relative path[%s] still in map", value.relativePath)

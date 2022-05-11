@@ -263,10 +263,11 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 	// Define how to enumerate its contents
 	// This func must be thread safe/goroutine safe
 	enumerateOneDir := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error)) error {
-		if _, ok := dir.(StoredObject); !ok {
-			panic("Entry in queue is not storedObject")
+		if _, ok := dir.(string); !ok {
+			panic("Entry in queue is not string")
 		}
-		so := dir.(StoredObject)
+
+		so := t.indexerMap.getStoredObject(dir.(string))
 		currentDirPath := so.relativePath
 
 		// This is applicable for only sync mode as source local give path without forward slash.
@@ -294,6 +295,8 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 					if t.includeDirectoryStubs {
 						// try to get properties on the directory itself, since it's not listed in BlobItems
+						// TODO: This logic need to be changed/revisit for deletion of folder on target which not present on source. As of now GetProperties failed everytime.
+						//       Which mean in case of blob target directory not enqueue to comparator.
 						fblobURL := containerURL.NewBlobURL(strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING))
 						resp, err := fblobURL.GetProperties(t.ctx, azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
 						if err == nil {

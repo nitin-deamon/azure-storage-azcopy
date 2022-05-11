@@ -119,7 +119,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			atomic.AddUint64(&cca.atomicDestinationFilesScanned, 1)
 		}
 	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions,
-		nil /* errorChannel */, nil /*folderIndexerMap */, tqueue, false /* isSource */, true /* isSync */, 0 /* maxObjectIndexerSizeInGB (not used by destination traverse) */, cca.lastSyncTime /* lastSyncTime */, cca.cfdMode)
+		nil /* errorChannel */, objectIndexerMap /*folderIndexerMap */, tqueue, false /* isSource */, true /* isSync */, 0 /* maxObjectIndexerSizeInGB (not used by destination traverse) */, cca.lastSyncTime /* lastSyncTime */, cca.cfdMode)
 	if err != nil {
 		return nil, err
 	}

@@ -186,9 +186,9 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 
 	// Do this check separately so we don't end up with a bunch of code duplication when new src/dstn are added
 	if cooked.fromTo.From() == common.ELocation.Local() {
-		cooked.source = common.ResourceString{Value: common.ToExtendedPath(cleanLocalPath(raw.src))}
+		cooked.source = common.ResourceString{Value: common.ToExtendedPath(common.CleanLocalPath(raw.src))}
 	} else if cooked.fromTo.To() == common.ELocation.Local() {
-		cooked.destination = common.ResourceString{Value: common.ToExtendedPath(cleanLocalPath(raw.dst))}
+		cooked.destination = common.ResourceString{Value: common.ToExtendedPath(common.CleanLocalPath(raw.dst))}
 	}
 
 	// we do not support service level sync yet

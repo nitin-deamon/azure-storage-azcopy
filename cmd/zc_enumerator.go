@@ -337,7 +337,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 
 	// Clean up the resource if it's a local path
 	if location == common.ELocation.Local() {
-		resource = common.ResourceString{Value: cleanLocalPath(resource.ValueLocal())}
+		resource = common.ResourceString{Value: common.CleanLocalPath(resource.ValueLocal())}
 	}
 
 	// Initialize the pipeline if creds and ctx is provided
@@ -395,7 +395,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				}
 			}()
 
-			baseResource := resource.CloneWithValue(cleanLocalPath(basePath))
+			baseResource := resource.CloneWithValue(common.CleanLocalPath(basePath))
 			output = newListTraverser(baseResource, location, nil, nil, recursive, toFollow, getProperties,
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {

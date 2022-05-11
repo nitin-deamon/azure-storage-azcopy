@@ -21,10 +21,10 @@
 package cmd
 
 import (
-	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
@@ -139,9 +139,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	lcFileName = filepath.Base(lcRelativePath)
 
 	f.sourceFolderIndex.lock.Lock()
-	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
-		lcFolderName = path.Join(lcFolderName, lcFileName)
-	}
+
 	foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
 
 	// Do the auditing of map.
@@ -159,19 +157,24 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		f.sourceFolderIndex.lock.Unlock()
 	}()
 
-	fmt.Printf("Folder: %s, File: %s\n", lcFolderName, lcFileName)
-	// Folder Case
+	// Folder Case.
 	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
+
 		if destinationObject.isFolderEndMarker {
+			var size int64
 
-			if !folderPresent {
-				return nil
-			}
+			// Each folder storedObject stored in its parent directory, one exception to this is root folder.
+			// Which is stored in root folder only as "." filename. End marker come for folder present on source.
+			// NOTE: Following are the scenarios for end marker.
+			//       1. End Marker came for folder which is not present on target.
+			//       2. End Marker came for folder present on target.
 
-			for file := range foldermap.indexMap {
-				storedObject := foldermap.indexMap[file]
-				delete(foldermap.indexMap, file)
-
+			// This will happen if folder not present on target. Lets create folder first and then files.
+			// In case folder present then it will taken in else case.
+			if folderPresent {
+				storedObject := foldermap.indexMap[lcFileName]
+				size += storedObjectSize(storedObject)
+				delete(foldermap.indexMap, lcFileName)
 				metaChange, dataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
 				if dataChange {
 					f.copyTransferScheduler(storedObject)
@@ -179,13 +182,50 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 				if metaChange {
 					// TODO: Add calls to just update meta data of file.
 				}
+
+				// Delete the parent map of folder if it's empty.
+				if len(f.sourceFolderIndex.folderMap[lcFolderName].indexMap) == 0 {
+					delete(f.sourceFolderIndex.folderMap, lcFolderName)
+				}
 			}
 
+			lcFolderName = path.Join(lcFolderName, lcFileName)
+			foldermap, folderPresent = f.sourceFolderIndex.folderMap[lcFolderName]
+			// lets copy all the files underneath in this folder which are left out.
+			// It may happen all the files present on target then there is nothing left in map, otherwise left files will be taken care.
+			if folderPresent {
+				for file := range foldermap.indexMap {
+					storedObject := foldermap.indexMap[file]
+					size += storedObjectSize(storedObject)
+					delete(foldermap.indexMap, file)
+
+					metaChange, dataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
+					if dataChange {
+						f.copyTransferScheduler(storedObject)
+					}
+					if metaChange {
+						// TODO: Add calls to just update meta data of file.
+					}
+				}
+			}
+			size = -size
+			atomic.AddInt64(&f.sourceFolderIndex.totalSize, size)
+
+			if atomic.LoadInt64(&f.sourceFolderIndex.totalSize) < 0 {
+				panic("Total Size is negative.")
+			}
 			return nil
 		} else {
-			// Lets create folder on target side.
+			// Folder present on source and its present on target too.
 			if folderPresent {
-				sourceObjectInMap = foldermap.folderObject
+				sourceObjectInMap = foldermap.indexMap[lcFileName]
+				delete(foldermap.indexMap, lcFileName)
+				size := storedObjectSize(sourceObjectInMap)
+				size = -size
+				atomic.AddInt64(&f.sourceFolderIndex.totalSize, size)
+				if sourceObjectInMap.relativePath != destinationObject.relativePath {
+					panic("Relative Path not matched")
+				}
 				if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
 					err := f.copyTransferScheduler(sourceObjectInMap)
 					if err != nil {
@@ -193,7 +233,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 					}
 				}
 			} else {
-				// Folder Deletion not enabled on azcopy. So its no-op only.
+				// We detect folder not present on source, now we need to delete the folder and files underneath.
 				// TODO: Need to add call to delete the folder.
 				_ = f.destinationCleaner(destinationObject)
 			}
@@ -207,6 +247,12 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 
 		// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
 		if present {
+			size := storedObjectSize(sourceObjectInMap)
+			size = -size
+			atomic.AddInt64(&f.sourceFolderIndex.totalSize, size)
+			if sourceObjectInMap.relativePath != destinationObject.relativePath {
+				panic("Relative Path not matched")
+			}
 			if f.disableComparison || sourceObjectInMap.isMoreRecentThan(destinationObject) {
 				err := f.copyTransferScheduler(sourceObjectInMap)
 				if err != nil {

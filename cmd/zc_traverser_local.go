@@ -24,10 +24,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -188,7 +186,7 @@ func (s symlinkTargetFileInfo) Name() string {
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
 func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
-	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, enumerateOneFileSystemDirectory parallel.EnumerateOneDir, constructStoredObject parallel.StoredObjectFunc) (err error) {
+	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -226,8 +224,8 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel
 				}
 				return nil
 			}
-			computedRelativePath := strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(queueItem.fullPath))
-			computedRelativePath = cleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
+			computedRelativePath := strings.TrimPrefix(common.CleanLocalPath(filePath), common.CleanLocalPath(queueItem.fullPath))
+			computedRelativePath = common.CleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
 			computedRelativePath = strings.TrimPrefix(computedRelativePath, common.AZCOPY_PATH_SEPARATOR_STRING)
 
 			if computedRelativePath == "." {
@@ -367,7 +365,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel
 					return nil
 				}
 			}
-		}, enumerateOneFileSystemDirectory, constructStoredObject, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
+		}, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -416,7 +414,8 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 			// constructStoredObject creates the storedObject from fileInfo.
 			constructStoredObject := func(filePath string, fileInfo os.FileInfo) interface{} {
 				var entityType common.EntityType
-				relPath := strings.TrimPrefix(strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(t.fullPath)), common.DeterminePathSeparator(t.fullPath))
+				relPath := common.RelativePath(filePath, t.fullPath)
+
 				if fileInfo.IsDir() {
 					entityType = common.EEntityType.Folder()
 				} else {
@@ -455,7 +454,7 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					entityType = common.EEntityType.File()
 				}
 
-				relPath := strings.TrimPrefix(strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(t.fullPath)), common.DeterminePathSeparator(t.fullPath))
+				relPath := common.RelativePath(filePath, t.fullPath)
 				if !t.followSymlinks && fileInfo.Mode()&os.ModeSymlink != 0 {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Skipping over symlink at %s because --follow-symlinks is false", common.GenerateFullPath(t.fullPath, relPath)))
 					return nil
@@ -472,69 +471,11 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					processor)
 			}
 
-			// enumerateOneFileSystemDirectory is an implementation of EnumerateOneDirFunc specifically for the local file system
-			enumerateOneFileSystemDirectory := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error), r parallel.DirReader) error {
-				var dirString string
-				so := dir.(StoredObject)
-
-				dirString = path.Join(t.fullPath, so.relativePath)
-				fmt.Println("Path: ", dirString)
-				d, err := os.Open(dirString) // for directories, we don't need a special open with FILE_FLAG_BACKUP_SEMANTICS, because directory opening uses FindFirst which doesn't need that flag. https://blog.differentpla.net/blog/2007/05/25/findfirstfile-and-se_backup_name
-				if err != nil {
-					// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
-					enqueueOutput(parallel.FileSystemEntry{
-						FullPath: dirString,
-						Info:     nil,
-					}, err)
-
-					// Since we have already enqueued the failed enumeration entry, return nil error to avoid duplicate queueing by workerLoop().
-					return nil
-				}
-				defer d.Close()
-
-				// enumerate immediate children
-				for {
-					list, err := r.Readdir(d, 1024) // list it in chunks, so that if we get child dirs early, parallel workers can start working on them
-					if err == io.EOF {
-						if len(list) > 0 {
-							panic("unexpected non-empty list")
-						}
-						return nil
-					} else if err != nil {
-						// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
-						enqueueOutput(parallel.FileSystemEntry{dirString, nil}, err)
-
-						// Since we have already enqueued the failed enumeration entry, return nil error to avoid duplicate queueing by workerLoop().
-						return nil
-					}
-					for _, childInfo := range list {
-						childEntry := parallel.FileSystemEntry{
-							FullPath: filepath.Join(dirString, childInfo.Name()),
-							Info:     childInfo,
-						}
-
-						if failable, ok := childInfo.(parallel.FailableFileInfo); ok && failable.Error() != nil {
-							// while Readdir as a whole did not fail, this particular file info did
-							enqueueOutput(childEntry, failable.Error())
-							continue
-						}
-						isSymlink := childInfo.Mode()&os.ModeSymlink != 0 // for compatibility with filepath.Walk, we do not follow symlinks, but we do enqueue them as output
-						if childInfo.IsDir() && !isSymlink {
-							so := constructStoredObject(childEntry.FullPath, childEntry.Info)
-							enqueueDir(so)
-						}
-						enqueueOutput(childEntry, nil)
-					}
-				}
-			}
-
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB,
-					enumerateOneFileSystemDirectory, constructStoredObject)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB,
-					enumerateOneFileSystemDirectory, constructStoredObject)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath
@@ -616,7 +557,7 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
 	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) *localTraverser {
 	traverser := localTraverser{
-		fullPath:                    cleanLocalPath(fullPath),
+		fullPath:                    common.CleanLocalPath(fullPath),
 		recursive:                   recursive,
 		followSymlinks:              followSymlinks,
 		appCtx:                      ctx,
@@ -629,26 +570,4 @@ func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, fo
 		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,
 	}
 	return &traverser
-}
-
-func cleanLocalPath(localPath string) string {
-	localPathSeparator := common.DeterminePathSeparator(localPath)
-	// path.Clean only likes /, and will only handle /. So, we consolidate it to /.
-	// it will do absolutely nothing with \.
-	normalizedPath := path.Clean(strings.ReplaceAll(localPath, localPathSeparator, common.AZCOPY_PATH_SEPARATOR_STRING))
-	// return normalizedPath path separator.
-	normalizedPath = strings.ReplaceAll(normalizedPath, common.AZCOPY_PATH_SEPARATOR_STRING, localPathSeparator)
-
-	// path.Clean steals the first / from the // or \\ prefix.
-	if strings.HasPrefix(localPath, `\\`) || strings.HasPrefix(localPath, `//`) {
-		// return the \ we stole from the UNC/extended path.
-		normalizedPath = localPathSeparator + normalizedPath
-	}
-
-	// path.Clean steals the last / from C:\, C:/, and does not add one for C:
-	if common.RootDriveRegex.MatchString(strings.ReplaceAll(common.ToShortPath(normalizedPath), common.OS_PATH_SEPARATOR, common.AZCOPY_PATH_SEPARATOR_STRING)) {
-		normalizedPath += common.OS_PATH_SEPARATOR
-	}
-
-	return normalizedPath
 }
