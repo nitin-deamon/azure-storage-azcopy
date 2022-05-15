@@ -47,14 +47,14 @@ type DirReader interface {
 // It does not follow symlinks.
 // The items in the CrawResult output channel are FileSystemEntry s.
 // For a wrapper that makes this look more like filepath.Walk, see parallel.Walk.
-func CrawlLocalDirectory(ctx context.Context, root string, parallelism int, reader DirReader) <-chan CrawlResult {
+func CrawlLocalDirectory(ctx context.Context, root Directory, parallelism int, reader DirReader, getIndexerSize func() int64,
+	tqueue chan interface{}, isSource bool, isSync bool, maxIndexerObjectSizeInGB uint) <-chan CrawlResult {
 	return Crawl(ctx,
 		root,
 		func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error {
 			return enumerateOneFileSystemDirectory(dir, enqueueDir, enqueueOutput, reader)
 		},
-		parallelism,
-	)
+		parallelism, getIndexerSize, tqueue, isSource, isSync, maxIndexerObjectSizeInGB)
 }
 
 // Walk is similar to filepath.Walk.
@@ -63,7 +63,8 @@ func CrawlLocalDirectory(ctx context.Context, root string, parallelism int, read
 //    (whereas with filepath.Walk it will usually (always?) have a value).
 // 2. If the return value of walkFunc function is not nil, enumeration will always stop, not matter what the type of the error.
 //    (Unlike filepath.WalkFunc, where returning filePath.SkipDir is handled as a special case).
-func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc) {
+func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc,
+	getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	signalRootError := func(e error) {
@@ -88,11 +89,13 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 		signalRootError(err)
 		return
 	}
+
 	err = walkFn(root, rs, nil)
 	if err != nil {
 		signalRootError(err)
 		return
 	}
+
 	_ = r.Close()
 
 	// walk the stuff inside the root
@@ -103,7 +106,7 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
-	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader)
+	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
 		entry, err := crawlResult.Item()
 		if err == nil {
@@ -132,7 +135,10 @@ func enumerateOneFileSystemDirectory(dir Directory, enqueueDir func(Directory), 
 	d, err := os.Open(dirString) // for directories, we don't need a special open with FILE_FLAG_BACKUP_SEMANTICS, because directory opening uses FindFirst which doesn't need that flag. https://blog.differentpla.net/blog/2007/05/25/findfirstfile-and-se_backup_name
 	if err != nil {
 		// FileInfo value being nil should mean that the FileSystemEntry refers to a directory.
-		enqueueOutput(FileSystemEntry{dirString, nil}, err)
+		enqueueOutput(FileSystemEntry{
+			fullPath: dirString,
+			info:     nil,
+		}, err)
 
 		// Since we have already enqueued the failed enumeration entry, return nil error to avoid duplicate queueing by workerLoop().
 		return nil
