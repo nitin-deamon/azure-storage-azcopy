@@ -24,10 +24,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 
@@ -86,7 +87,7 @@ type rawSyncCmdArgs struct {
 	// Provided key name will be fetched from Azure Key Vault and will be used to encrypt the data
 	cpkScopeInfo string
 	// dry run mode bool
-	dryrun              bool
+	dryrun bool
 }
 
 func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []string) {
@@ -174,9 +175,9 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 
 	// Do this check separately so we don't end up with a bunch of code duplication when new src/dstn are added
 	if cooked.fromTo.From() == common.ELocation.Local() {
-		cooked.source = common.ResourceString{Value: common.ToExtendedPath(cleanLocalPath(raw.src))}
+		cooked.source = common.ResourceString{Value: common.ToExtendedPath(common.CleanLocalPath(raw.src))}
 	} else if cooked.fromTo.To() == common.ELocation.Local() {
-		cooked.destination = common.ResourceString{Value: common.ToExtendedPath(cleanLocalPath(raw.dst))}
+		cooked.destination = common.ResourceString{Value: common.ToExtendedPath(common.CleanLocalPath(raw.dst))}
 	}
 
 	// we do not support service level sync yet
@@ -327,6 +328,17 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 	return cooked, nil
 }
 
+type CFDModeFlags struct {
+	// Change detection flags.
+	TargetCompare bool
+	CtimeMtime    bool
+	Ctime         bool
+	ArchiveBit    bool
+
+	// MetaDataOnlySync decides if we copy entire file even when change file detection finds out that only file's metadata has changed.
+	MetaDataOnlySync bool
+}
+
 type cookedSyncCmdArgs struct {
 	// NOTE: for the 64 bit atomic functions to work on a 32 bit system, we have to guarantee the right 64-bit alignment
 	// so the 64 bit integers are placed first in the struct to avoid future breaks
@@ -347,7 +359,7 @@ type cookedSyncCmdArgs struct {
 
 	source         common.ResourceString
 	destination    common.ResourceString
-        fromTo         common.FromTo
+	fromTo         common.FromTo
 	credentialInfo common.CredentialInfo
 	isHNSToHNS     bool // Because DFS sources and destinations are obscured, this is necessary for folder property transfers on ADLS Gen 2.
 
@@ -407,6 +419,10 @@ type cookedSyncCmdArgs struct {
 	mirrorMode bool
 
 	dryrunMode bool
+
+	cfdMode CFDModeFlags
+
+	lastSyncTime time.Time
 }
 
 func (cca *cookedSyncCmdArgs) incrementDeletionCount() {
