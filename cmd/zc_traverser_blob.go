@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
 
@@ -55,6 +56,16 @@ type blobTraverser struct {
 	s2sPreserveSourceTags bool
 
 	cpkOptions common.CpkOptions
+
+	// Fields applicable only to sync operation.
+	isSync     bool
+	indexerMap *folderIndexer
+
+	// Communication channel between source and destination traverser.
+	sourceDestinationCh chan interface{}
+	isSource            bool
+	lastSync            time.Time
+	cfdMode             CFDModeFlags
 }
 
 func (t *blobTraverser) IsDirectory(isSource bool) bool {
@@ -316,7 +327,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, nil /* getObjectIndexerSize */, t.sourceDestinationCh, t.isSource, t.isSync, 0)
 
 	for x := range cCrawled {
 		item, workerError := x.Item()
@@ -418,7 +429,9 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 	return nil
 }
 
-func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, s2sPreserveSourceTags bool, cpkOptions common.CpkOptions) (t *blobTraverser) {
+func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, sourceDestinationCh chan interface{}, isSource bool, isSync bool, lastSync time.Time,
+	cfdMode CFDModeFlags) (t *blobTraverser) {
 	t = &blobTraverser{
 		rawURL:                      rawURL,
 		p:                           p,
@@ -429,6 +442,14 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		parallelListing:             true,
 		s2sPreserveSourceTags:       s2sPreserveSourceTags,
 		cpkOptions:                  cpkOptions,
+
+		// Sync related fields.
+		isSync:              isSync,
+		indexerMap:          indexerMap,
+		sourceDestinationCh: sourceDestinationCh,
+		isSource:            isSource,
+		lastSync:            lastSync,
+		cfdMode:             cfdMode,
 	}
 
 	if strings.ToLower(glcm.GetEnvironmentVariable(common.EEnvironmentVariable.DisableHierarchicalScanning())) == "true" {

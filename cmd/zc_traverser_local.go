@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -40,9 +39,19 @@ type localTraverser struct {
 	recursive      bool
 	followSymlinks bool
 	appCtx         *context.Context
+	indexerMap     *folderIndexer
 	// a generic function to notify that a new stored object has been enumerated
 	incrementEnumerationCounter enumerationCounterFunc
 	errorChannel                chan ErrorFileInfo
+
+	// Field applicable to only sync operation.
+	isSync bool
+
+	// Communication channel between source and destination traverser.
+	sourceDestinationCh chan interface{}
+
+	isSource                 bool
+	maxObjectIndexerSizeInGB uint
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -174,11 +183,13 @@ func (s symlinkTargetFileInfo) Name() string {
 	return s.name // override the name
 }
 
+//type WalkFunc() (StoredObject, error)
 // WalkWithSymlinks is a symlinks-aware, parallelized, version of filePath.Walk.
 // Separate this from the traverser for two purposes:
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
-func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo) (err error) {
+func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
+	sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -216,8 +227,8 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 				}
 				return nil
 			}
-			computedRelativePath := strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(queueItem.fullPath))
-			computedRelativePath = cleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
+			computedRelativePath := strings.TrimPrefix(common.CleanLocalPath(filePath), common.CleanLocalPath(queueItem.fullPath))
+			computedRelativePath = common.CleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
 			computedRelativePath = strings.TrimPrefix(computedRelativePath, common.AZCOPY_PATH_SEPARATOR_STRING)
 
 			if computedRelativePath == "." {
@@ -239,7 +250,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 
 			if fileInfo.Mode()&os.ModeSymlink != 0 {
 				if !followSymlinks {
-					return nil // skip it
+					return nil
 				}
 
 				/*
@@ -357,7 +368,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 					return nil
 				}
 			}
-		})
+		}, getIndexerMapSize, sourceDestinationCh, isSource, isSync, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -394,6 +405,40 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 		return err
 	} else {
 		if t.recursive {
+
+			getIndexerMapSize := func() int64 {
+				if t.indexerMap != nil {
+					return t.indexerMap.getIndexerMapSize()
+				} else {
+					return -1
+				}
+			}
+
+			// constructStoredObject creates the storedObject from fileInfo.
+			constructStoredObject := func(filePath string, fileInfo os.FileInfo) interface{} {
+				var entityType common.EntityType
+				relPath := common.RelativePath(filePath, t.fullPath)
+
+				if fileInfo.IsDir() {
+					entityType = common.EEntityType.Folder()
+				} else {
+					entityType = common.EEntityType.File()
+				}
+				so := newStoredObject(
+					preprocessor,
+					fileInfo.Name(),
+					strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
+					entityType,
+					fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
+					fileInfo.Size(),
+					noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
+					noBlobProps,
+					noMetdata,
+					"", // Local has no such thing as containers
+				)
+				return so
+			}
+
 			processFile := func(filePath string, fileInfo os.FileInfo, fileError error) error {
 				if fileError != nil {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Accessing %s failed with error: %s", filePath, fileError))
@@ -412,38 +457,28 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					entityType = common.EEntityType.File()
 				}
 
-				relPath := strings.TrimPrefix(strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(t.fullPath)), common.DeterminePathSeparator(t.fullPath))
+				relPath := common.RelativePath(filePath, t.fullPath)
 				if !t.followSymlinks && fileInfo.Mode()&os.ModeSymlink != 0 {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Skipping over symlink at %s because --follow-symlinks is false", common.GenerateFullPath(t.fullPath, relPath)))
 					return nil
 				}
+
+				storedObject := constructStoredObject(filePath, fileInfo)
 
 				if t.incrementEnumerationCounter != nil {
 					t.incrementEnumerationCounter(entityType)
 				}
 
 				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
-				return processIfPassedFilters(filters,
-					newStoredObject(
-						preprocessor,
-						fileInfo.Name(),
-						strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
-						entityType,
-						fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
-						fileInfo.Size(),
-						noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
-						noBlobProps,
-						noMetdata,
-						"", // Local has no such thing as containers
-					),
+				return processIfPassedFilters(filters, storedObject.(StoredObject),
 					processor)
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.sourceDestinationCh, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.sourceDestinationCh, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath
@@ -522,35 +557,20 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 	return
 }
 
-func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc, errorChannel chan ErrorFileInfo) *localTraverser {
+func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) *localTraverser {
 	traverser := localTraverser{
-		fullPath:                    cleanLocalPath(fullPath),
+		fullPath:                    common.CleanLocalPath(fullPath),
 		recursive:                   recursive,
 		followSymlinks:              followSymlinks,
 		appCtx:                      ctx,
+		indexerMap:                  indexerMap,
 		incrementEnumerationCounter: incrementEnumerationCounter,
-		errorChannel:                errorChannel}
+		errorChannel:                errorChannel,
+		isSync:                      isSync,
+		sourceDestinationCh:         sourceDestinationCh,
+		isSource:                    isSource,
+		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,
+	}
 	return &traverser
-}
-
-func cleanLocalPath(localPath string) string {
-	localPathSeparator := common.DeterminePathSeparator(localPath)
-	// path.Clean only likes /, and will only handle /. So, we consolidate it to /.
-	// it will do absolutely nothing with \.
-	normalizedPath := path.Clean(strings.ReplaceAll(localPath, localPathSeparator, common.AZCOPY_PATH_SEPARATOR_STRING))
-	// return normalizedPath path separator.
-	normalizedPath = strings.ReplaceAll(normalizedPath, common.AZCOPY_PATH_SEPARATOR_STRING, localPathSeparator)
-
-	// path.Clean steals the first / from the // or \\ prefix.
-	if strings.HasPrefix(localPath, `\\`) || strings.HasPrefix(localPath, `//`) {
-		// return the \ we stole from the UNC/extended path.
-		normalizedPath = localPathSeparator + normalizedPath
-	}
-
-	// path.Clean steals the last / from C:\, C:/, and does not add one for C:
-	if common.RootDriveRegex.MatchString(strings.ReplaceAll(common.ToShortPath(normalizedPath), common.OS_PATH_SEPARATOR, common.AZCOPY_PATH_SEPARATOR_STRING)) {
-		normalizedPath += common.OS_PATH_SEPARATOR
-	}
-
-	return normalizedPath
 }

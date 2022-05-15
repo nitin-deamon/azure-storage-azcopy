@@ -23,8 +23,10 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"github.com/Azure/azure-pipeline-go/pipeline"
 	"net/url"
+	"time"
+
+	"github.com/Azure/azure-pipeline-go/pipeline"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 )
@@ -109,7 +111,9 @@ func newListTraverser(parent common.ResourceString, parentType common.Location, 
 		// Construct a traverser that goes through the child
 		traverser, err := InitResourceTraverser(source, parentType, ctx, credential, &followSymlinks,
 			nil, recursive, getProperties, includeDirectoryStubs, incrementEnumerationCounter,
-			nil, s2sPreserveBlobTags, logLevel, cpkOptions, nil)
+			nil, s2sPreserveBlobTags, logLevel, cpkOptions, nil, /* errorChannel */
+			nil /* folderIndexer */, nil, /* sourceDestinationCh */
+			false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 		if err != nil {
 			return nil, err
 		}
