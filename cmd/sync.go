@@ -24,10 +24,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/nitin-deamon/azure-storage-azcopy/v10/jobsAdmin"
 
 	"github.com/Azure/azure-pipeline-go/pipeline"
 
@@ -86,7 +88,23 @@ type rawSyncCmdArgs struct {
 	// Provided key name will be fetched from Azure Key Vault and will be used to encrypt the data
 	cpkScopeInfo string
 	// dry run mode bool
-	dryrun              bool
+	dryrun bool
+
+	// Change file detection flag. Valid Flag are TargetCompare, Ctime, CtimeMtime and ArchiveBit
+	// TargetCompare - Default sync comparsion where target enumerated for each file. It's least optimized, but gurantee no data loss.
+	// Ctime - CTime used to detect change files/folder. Should be used where mtime not reliable.
+	// CtimeMtime - Both CTime	and MTime used to detect changed files/folder. It's most efficient in all of the cfdModes.
+	// ArchiveBit - Archivebit is the only reliable source to detetct changed files/folder.
+	cfdMode string
+
+	// Optimization flag to transfer metaData in case of only metadata change.
+	MetaDataOnlySync bool
+
+	// lastSyncTime to compare with file/Dir time.
+	lastSyncTime string
+
+	// maxObjectIndexerMapSizeInGB limit on size of ObjectIndexerMap in memory.
+	maxObjectIndexerMapSizeInGB string
 }
 
 func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []string) {
@@ -115,6 +133,35 @@ func (raw *rawSyncCmdArgs) validateURLIsNotServiceLevel(url string, location com
 	}
 
 	return nil
+}
+
+func (raw *rawSyncCmdArgs) parseMaxObjectIndexerMapInGb() (uint32, error) {
+	value, err := strconv.Atoi(raw.maxObjectIndexerMapSizeInGB)
+	if value < 0 {
+		err = fmt.Errorf("maxObjectIndexerMapSizeInGb is negative")
+		return 0, err
+	}
+
+	if err != nil {
+		return uint32(value), fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGb with error: %v", err)
+	}
+
+	return uint32(value), nil
+}
+
+func (raw *rawSyncCmdArgs) parseCFDMode() common.CFDMode {
+	cfdMode := strings.ToLower(raw.cfdMode)
+	if cfdMode == strings.ToLower(common.CFDModeFlags.TargetCompare().String()) {
+		return common.CFDModeFlags.TargetCompare()
+	} else if cfdMode == strings.ToLower(common.CFDModeFlags.Ctime().String()) {
+		return common.CFDModeFlags.Ctime()
+	} else if cfdMode == strings.ToLower(common.CFDModeFlags.CtimeMtime().String()) {
+		return common.CFDModeFlags.CtimeMtime()
+	} else if cfdMode == strings.ToLower(common.CFDModeFlags.ArchiveBit().String()) {
+		return common.CFDModeFlags.ArchiveBit()
+	} else {
+		return common.CFDModeFlags.TargetCompare()
+	}
 }
 
 // validates and transform raw input into cooked input
@@ -269,6 +316,24 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 	if err = validatePutMd5(cooked.putMd5, cooked.fromTo); err != nil {
 		return cooked, err
 	}
+	// Process the Sync mode for comparsion.
+	cooked.cfdMode = raw.parseCFDMode()
+
+	// Parse lastSyncTime for comparsion.
+	if raw.lastSyncTime != "" {
+		cooked.lastSyncTime, err = parseISO8601(raw.lastSyncTime, true)
+		if err != nil {
+			return cooked, err
+		}
+	} else {
+		cooked.lastSyncTime = time.Time{}
+	}
+
+	// Parse maxObjectIndexerMapSizeInGb
+	cooked.maxObjectIndexerMapSizeInGb, err = raw.parseMaxObjectIndexerMapInGb()
+	if err != nil {
+		return cooked, err
+	}
 
 	err = cooked.md5ValidationOption.Parse(raw.md5ValidationOption)
 	if err != nil {
@@ -347,7 +412,7 @@ type cookedSyncCmdArgs struct {
 
 	source         common.ResourceString
 	destination    common.ResourceString
-        fromTo         common.FromTo
+	fromTo         common.FromTo
 	credentialInfo common.CredentialInfo
 	isHNSToHNS     bool // Because DFS sources and destinations are obscured, this is necessary for folder property transfers on ADLS Gen 2.
 
@@ -407,6 +472,12 @@ type cookedSyncCmdArgs struct {
 	mirrorMode bool
 
 	dryrunMode bool
+
+	cfdMode common.CFDMode
+
+	lastSyncTime time.Time
+
+	maxObjectIndexerMapSizeInGb uint32
 }
 
 func (cca *cookedSyncCmdArgs) incrementDeletionCount() {
@@ -768,6 +839,22 @@ func init() {
 	syncCmd.PersistentFlags().StringVar(&raw.legacyExclude, "exclude", "", "Legacy exclude param. DO NOT USE")
 	syncCmd.PersistentFlags().MarkHidden("include")
 	syncCmd.PersistentFlags().MarkHidden("exclude")
+
+	// Changed file detetction mode.
+	syncCmd.PersistentFlags().StringVar(&raw.cfdMode, "cfd-mode", "TargetCompare", " cfd-mode is Change File Detection Mode. It has valid values TargetCompare(default), Ctime, CtimeMtime, ArchiveBit."+
+		"\n TargetCompare - Default sync comparsion where target enumerated for each file. It's least optimized, but gurantee no data loss."+
+		"\n Ctime - Ctime used to detect change files/folder. Should be used where mtime not reliable."+
+		"\n CtimeMtime - Both Ctime	and Mtime used to detect changed files/folder. It's most efficient in all of the cfdModes."+
+		"\n ArchiveBit - Archivebit is the only reliable source to detect changed files/folder.")
+
+	// Optimization for metaData only copy case.
+	syncCmd.PersistentFlags().BoolVar(&raw.MetaDataOnlySync, "MetaDataOnlySync", false, "Optimization to transfer only metaData in case of metadata change only.")
+
+	// Time from which file change detection done.
+	syncCmd.PersistentFlags().StringVar(&raw.lastSyncTime, "lastSyncTime", "", "Include files modified after lastSyncTime.")
+
+	// Limit on size ObjectIndexerMap in memory.
+	syncCmd.PersistentFlags().StringVar(&raw.maxObjectIndexerMapSizeInGB, "maxObjectIndexerMapSizeInGB", "", "maxObjectIndexerMapSizeInGB is the limit of map size in memory, provide the value in terms of GB")
 
 	// TODO follow sym link is not implemented, clarify behavior first
 	//syncCmd.PersistentFlags().BoolVar(&raw.followSymlinks, "follow-symlinks", false, "follow symbolic links when performing sync from local file system.")
