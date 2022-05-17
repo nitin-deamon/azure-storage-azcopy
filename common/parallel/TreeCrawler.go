@@ -191,23 +191,23 @@ func (c *crawler) receiveOnTqueue() {
 
 // autoPacerWait do the job of pacemaker between source and target traverser.
 func (c *crawler) autoPacerWait(ctx context.Context) {
-	const SizeInGB = 1024 * 1024 * 1024
+	const bytesInGB = 1024 * 1024 * 1024
 	//
 	// Consider 80% full as low-water-mark. Anything less than 80% full is fair game and we let the source traverser
 	// run full throttle. Once it exceeds low-water-mark we slowly start taking the foot off the pedal and every thread/goroutine
 	// needs to wait for a small time before proceeding. Once it touches/crosses high-water-mark no scanner thread/goroutine will
-	// be allowed to proceed. For reasonable sized directories this should ensure that we remain in MaxObjectIndexerSizeGB limit
-	// for most practical scenarios. For large/huge directories we might exceed MaxObjectIndexerSizeGB by the size of the largest directory.
+	// be allowed to proceed. For reasonable sized directories this should ensure that we remain in MaxObjectIndexerSizeInBytes limit
+	// for most practical scenarios. For large/huge directories we might exceed MaxObjectIndexerSizeInBytes by the size of the largest directory.
 	//
-	MaxObjectIndexerSizeGB := int64(c.maxObjectIndexerSizeInGB * SizeInGB)
-	lowWaterMarkMB := (MaxObjectIndexerSizeGB * 8) / 10
+	MaxObjectIndexerSizeInBytes := int64(c.maxObjectIndexerSizeInGB * bytesInGB)
+	lowWaterMark := (MaxObjectIndexerSizeInBytes * 8) / 10
 
-	highWaterMarkMB := MaxObjectIndexerSizeGB
+	highWaterMark := MaxObjectIndexerSizeInBytes
 
-	mapSize := c.getObjectIndexerMapSize()
+	mapSizeInBytes := c.getObjectIndexerMapSize()
 
 	// Nice sunny morning, press that pedal more.
-	if mapSize < lowWaterMarkMB {
+	if mapSizeInBytes < lowWaterMark {
 		return
 	}
 
@@ -217,15 +217,15 @@ func (c *crawler) autoPacerWait(ctx context.Context) {
 	// TODO: The sleep duration may be decided based on how fast the
 	//       objectIndexerMap is seen to be growing.
 	//
-	if mapSize < highWaterMarkMB && ctx.Err() == nil {
+	if mapSizeInBytes < highWaterMark && ctx.Err() == nil {
 		time.Sleep(1 * time.Second)
 		return
 	}
 
-	// In danger zone. Don't proceed any further without dropping the objectIndexerMap size below lowWaterMarkMB.
-	for mapSize > lowWaterMarkMB && ctx.Err() == nil {
+	// In danger zone. Don't proceed any further without dropping the objectIndexerMap size below lowWaterMark.
+	for mapSizeInBytes > lowWaterMark && ctx.Err() == nil {
 		time.Sleep(1 * time.Second)
-		mapSize = c.getObjectIndexerMapSize()
+		mapSizeInBytes = c.getObjectIndexerMapSize()
 	}
 
 	return
