@@ -105,7 +105,7 @@ func (t *blobAccountTraverser) Traverse(preprocessor objectMorpher, processor ob
 		containerTraverser := newBlobTraverser(&containerURL, t.p, t.ctx, true,
 			t.includeDirectoryStubs, t.incrementEnumerationCounter, t.s2sPreserveSourceTags, t.cpkOptions,
 			nil /* folderIndexer */, nil, /* tqueue*/
-			false /* isSource */, false /* isSync */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
+			false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerMapSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 
 		preprocessorForThisChild := preprocessor.FollowedBy(newContainerDecorator(v))
 

@@ -53,7 +53,7 @@ func newRemoveEnumerator(cca *CookedCopyCmdArgs) (enumerator *CopyEnumerator, er
 		nil, cca.ListOfFilesChannel, cca.Recursive, false, cca.IncludeDirectoryStubs,
 		func(common.EntityType) {}, cca.ListOfVersionIDs, false,
 		cca.LogVerbosity.ToPipelineLogLevel(), cca.CpkOptions, nil, /* errorChannel */
-		nil /* folderIndexer */, nil, /* sourceDestinationCh*/
+		nil /* folderIndexer */, nil, /* tqueue*/
 		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 
 	// report failure to create traverser

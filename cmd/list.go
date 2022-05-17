@@ -223,7 +223,7 @@ func (cooked cookedListCmdArgs) HandleListContainerCommand() (err error) {
 	traverser, err := InitResourceTraverser(source, cooked.location, &ctx, &credentialInfo, nil, nil,
 		true, false, false, func(common.EntityType) {},
 		nil, false, pipeline2.LogNone, common.CpkOptions{}, nil, /* errorChannel */
-		nil /* folderIndexer */, nil, /* sourceDestinationCh*/
+		nil /* folderIndexer */, nil, /* tqueue*/
 		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime */, CFDModeFlags{})
 
 	if err != nil {

@@ -57,7 +57,7 @@ func (s *genericTraverserSuite) TestBlobFSServiceTraverserWithManyObjects(c *chk
 
 	// Create a local traversal
 	localTraverser := newLocalTraverser(nil, dstDirName, true, true, func(common.EntityType) {}, nil, /* errorChannel */
-		nil /* folderIndexer */, nil, /* sourceDestinationCh */
+		nil /* folderIndexer */, nil, /* tqueue */
 		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */)
 
 	// Invoke the traversal with an indexer so the results are indexed for easy validation
@@ -175,7 +175,7 @@ func (s *genericTraverserSuite) TestServiceTraverserWithManyObjects(c *chk.C) {
 
 	// Create a local traversal
 	localTraverser := newLocalTraverser(nil, dstDirName, true, true, func(common.EntityType) {}, nil, /* errorChannel */
-		nil /* folderIndexer */, nil, /* sourceDestinationCh */
+		nil /* folderIndexer */, nil, /* tqueue */
 		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */)
 
 	// Invoke the traversal with an indexer so the results are indexed for easy validation
@@ -362,7 +362,7 @@ func (s *genericTraverserSuite) TestServiceTraverserWithWildcards(c *chk.C) {
 
 	// Create a local traversal
 	localTraverser := newLocalTraverser(nil, dstDirName, true, true, func(common.EntityType) {}, nil, /* errorChannel */
-		nil /* folderIndexer */, nil, /* sourceDestinationCh */
+		nil /* folderIndexer */, nil, /* tqueue */
 		false /* isSource */, false /* isSync */, 0 /* maxObjectIndexerSizeInGB */)
 
 	// Invoke the traversal with an indexer so the results are indexed for easy validation

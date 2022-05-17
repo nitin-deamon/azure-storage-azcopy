@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
@@ -39,19 +40,33 @@ type localTraverser struct {
 	recursive      bool
 	followSymlinks bool
 	appCtx         *context.Context
-	indexerMap     *folderIndexer
+
 	// a generic function to notify that a new stored object has been enumerated
 	incrementEnumerationCounter enumerationCounterFunc
 	errorChannel                chan ErrorFileInfo
 
 	// Field applicable to only sync operation.
+	// isSync boolean tells whether its copy operation or sync operation.
 	isSync bool
 
-	// Communication channel between source and destination traverser.
-	sourceDestinationCh chan interface{}
+	// Hierarchical map of files and folders seen on source side.
+	indexerMap *folderIndexer
 
-	isSource                 bool
+	// Communication channel between source and destination traverser.
+	tqueue chan interface{}
+
+	// For sync operation this falg tells whether this is source or target.
+	isSource bool
+
+	// Limit on size of objectIndexerMap in memory.
 	maxObjectIndexerSizeInGB uint
+
+	// lastSyncTime to detect file/folder changed since this time.
+	lastSyncTime time.Time
+
+	// cfdMode is change file detection mode. How to detect the file/folder changed.
+	// Changed files can be detected on basisi of ctime, ctimemtime , archiveBit or none.
+	cfdMode CFDModeFlags
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -188,8 +203,8 @@ func (s symlinkTargetFileInfo) Name() string {
 // Separate this from the traverser for two purposes:
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
-func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
-	sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) (err error) {
+func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getIndexerMapSize func() int64,
+	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -368,7 +383,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc parallel
 					return nil
 				}
 			}
-		}, getIndexerMapSize, sourceDestinationCh, isSource, isSync, maxObjectIndexerSizeInGB)
+		}, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -409,34 +424,8 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 			getIndexerMapSize := func() int64 {
 				if t.indexerMap != nil {
 					return t.indexerMap.getIndexerMapSize()
-				} else {
-					return -1
 				}
-			}
-
-			// constructStoredObject creates the storedObject from fileInfo.
-			constructStoredObject := func(filePath string, fileInfo os.FileInfo) interface{} {
-				var entityType common.EntityType
-				relPath := common.RelativePath(filePath, t.fullPath)
-
-				if fileInfo.IsDir() {
-					entityType = common.EEntityType.Folder()
-				} else {
-					entityType = common.EEntityType.File()
-				}
-				so := newStoredObject(
-					preprocessor,
-					fileInfo.Name(),
-					strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
-					entityType,
-					fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
-					fileInfo.Size(),
-					noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
-					noBlobProps,
-					noMetdata,
-					"", // Local has no such thing as containers
-				)
-				return so
+				panic("ObjectIndexerMap is nil")
 			}
 
 			processFile := func(filePath string, fileInfo os.FileInfo, fileError error) error {
@@ -463,22 +452,31 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					return nil
 				}
 
-				storedObject := constructStoredObject(filePath, fileInfo)
-
 				if t.incrementEnumerationCounter != nil {
 					t.incrementEnumerationCounter(entityType)
 				}
 
 				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
-				return processIfPassedFilters(filters, storedObject.(StoredObject),
-					processor)
+				return processIfPassedFilters(filters,
+					newStoredObject(
+						preprocessor,
+						fileInfo.Name(),
+						strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
+						entityType,
+						fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
+						fileInfo.Size(),
+						noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
+						noBlobProps,
+						noMetdata,
+						"", // Local has no such thing as containers
+					), processor)
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.sourceDestinationCh, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.sourceDestinationCh, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath
@@ -558,19 +556,24 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 }
 
 func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
-	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) *localTraverser {
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, lastSyncTime time.Time, cfdModes CFDModeFlags) *localTraverser {
+	// No need to validate sync parameters here as it will be done crawler.
 	traverser := localTraverser{
 		fullPath:                    common.CleanLocalPath(fullPath),
 		recursive:                   recursive,
 		followSymlinks:              followSymlinks,
 		appCtx:                      ctx,
-		indexerMap:                  indexerMap,
 		incrementEnumerationCounter: incrementEnumerationCounter,
 		errorChannel:                errorChannel,
-		isSync:                      isSync,
-		sourceDestinationCh:         sourceDestinationCh,
-		isSource:                    isSource,
-		maxObjectIndexerSizeInGB:    maxObjectIndexerSizeInGB,
+
+		// Sync related fields.
+		isSync:                   isSync,
+		indexerMap:               indexerMap,
+		tqueue:                   tqueue,
+		isSource:                 isSource,
+		lastSyncTime:             lastSyncTime,
+		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
 	}
+
 	return &traverser
 }

@@ -48,16 +48,14 @@ type DirReader interface {
 // The items in the CrawResult output channel are FileSystemEntry s.
 // For a wrapper that makes this look more like filepath.Walk, see parallel.Walk.
 func CrawlLocalDirectory(ctx context.Context, root Directory, parallelism int, reader DirReader, getIndexerSize func() int64,
-	sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxIndexerObjectSizeInGB uint) <-chan CrawlResult {
+	tqueue chan interface{}, isSource bool, isSync bool, maxIndexerObjectSizeInGB uint) <-chan CrawlResult {
 	return Crawl(ctx,
 		root,
 		func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error {
 			return enumerateOneFileSystemDirectory(dir, enqueueDir, enqueueOutput, reader)
 		},
-		parallelism, getIndexerSize, sourceDestinationCh, isSource, isSync, maxIndexerObjectSizeInGB)
+		parallelism, getIndexerSize, tqueue, isSource, isSync, maxIndexerObjectSizeInGB)
 }
-
-type WalkFunc func(filePath string, fileInfo os.FileInfo, fileError error) error
 
 // Walk is similar to filepath.Walk.
 // But note the following difference is how WalkFunc is used:
@@ -65,8 +63,8 @@ type WalkFunc func(filePath string, fileInfo os.FileInfo, fileError error) error
 //    (whereas with filepath.Walk it will usually (always?) have a value).
 // 2. If the return value of walkFunc function is not nil, enumeration will always stop, not matter what the type of the error.
 //    (Unlike filepath.WalkFunc, where returning filePath.SkipDir is handled as a special case).
-func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn WalkFunc,
-	getIndexerMapSize func() int64, sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) {
+func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc,
+	getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	signalRootError := func(e error) {
@@ -108,7 +106,7 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
-	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getIndexerMapSize, sourceDestinationCh, isSource, isSync, maxObjectIndexerSizeInGB)
+	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
 		entry, err := crawlResult.Item()
 		if err == nil {

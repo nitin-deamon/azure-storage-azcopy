@@ -102,7 +102,8 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 		i.folderMap[lcFolderName] = newObjectIndexer()
 	}
 
-	if lcFileName != "" {
+	// Create child entry for file/folder. For root folder this is not applicable as its not child of anyone.
+	if lcRelativePath != "" {
 		if _, ok := i.folderMap[lcFolderName].indexMap[lcFileName]; !ok {
 			i.folderMap[lcFolderName].indexMap[lcFileName] = storedObject
 		} else {
@@ -112,18 +113,24 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	}
 
 	/*
-	 * Why we need to this because folder storedObject get deleted as parent enumeration only exception to this root folder.
-	 * We need storedObject of this folder at time of this folder enumeration.
+	 * Why we need to this because folder storedObject get deleted as part of parent enumeration, only exception to this
+	 * is root folder. As there will be no parent of root folder. We need storedObject of every folder at time target enumeration
+	 * to detect whether folder changed since last sync time. So we create folder stored object entry in its own folder map with filename
+	 * "." which represent current folder only. Now there will be 2 entries for folder one under parent directory and other one
+	 * under itself. First entry will be deleted at time of parent enueration and second will be deleted at time of self enumeration.
 	 *
-	 * Note: We can make it same for root folder too, without any use. It will make code same for all cases.
 	 */
 	if storedObject.isVirtualFolder || storedObject.entityType == common.EEntityType.Folder() {
 		lcFolderName = path.Join(lcFolderName, lcFileName)
 		if _, ok := i.folderMap[lcFolderName]; !ok {
 			i.folderMap[lcFolderName] = newObjectIndexer()
 		}
-		i.folderMap[lcFolderName].folderObject = storedObject
-		size += size
+		if _, ok := i.folderMap[lcFolderName].indexMap["."]; !ok {
+			i.folderMap[lcFolderName].indexMap["."] = storedObject
+		} else {
+			fmt.Printf("Folder[%s] storedObject already present in map", lcRelativePath)
+			return errors.Errorf("Folder[%s] storedObject already present in map", lcRelativePath)
+		}
 	}
 
 	/*

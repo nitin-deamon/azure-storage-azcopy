@@ -45,11 +45,11 @@ type crawler struct {
 
 	// Its communication channel not exactly queue, as soon as we get something on this channel we pop it and append to
 	// unstartedDirs (that's target queue).
-	sourceTargetCh chan interface{}
+	tqueue chan interface{}
 
 	isSource                 bool
 	maxObjectIndexerSizeInGB uint
-	isDirsPending            bool
+	mayHaveMoreDirs          bool
 }
 
 type Directory interface{}
@@ -69,13 +69,13 @@ type EnumerateOneDirFunc func(dir Directory, enqueueDir func(Directory), enqueue
 
 // Crawl crawls an abstract directory tree, using the supplied enumeration function.  May be use for whatever
 // that function can enumerate (i.e. not necessarily a local file system, just anything tree-structured)
-// getObjectIndexerMapSize func returns in-memory map size, sourceTargetCh is channel between source and target enumeration.
+// getObjectIndexerMapSize func returns in-memory map size, tqueue is channel between source and target enumeration.
 // isSource tells whether its source or target traverser.
 // isSync flag tells whether its sync or copy operation.
 // maxObjectIndexerSizeInGB is configurable value tells how much maximum memory ObjectIndexerMap can occupy.
-// sourceDestinationCh buffer size and maxObjectIndexerSizeInGB determine speed of sync enumeration. As of now sourceTargetCh size is fixed to 100*1000 entries.
-// TODO: Need to determine optimal value of sourceTargetCh and maxObjectIndexerSizeInGB for ideal case.
-func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getObjectIndexerMapSize func() int64, sourceDestinationCh chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) <-chan CrawlResult {
+// tqueue buffer size and maxObjectIndexerSizeInGB determine speed of sync enumeration. As of now tqueue size is fixed to 100*1000 entries.
+// TODO: Need to determine optimal value of tqueue and maxObjectIndexerSizeInGB for ideal case.
+func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getObjectIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) <-chan CrawlResult {
 	c := &crawler{
 		unstartedDirs: make([]Directory, 0, 1024),
 		output:        make(chan CrawlResult, 1000),
@@ -87,14 +87,14 @@ func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, para
 		// Sync related parameters.
 		isSync:                   isSync,
 		getObjectIndexerMapSize:  getObjectIndexerMapSize,
-		sourceTargetCh:           sourceDestinationCh,
+		tqueue:                   tqueue,
 		isSource:                 isSource,
 		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
 	}
 
 	if isSync {
-		if sourceDestinationCh == nil {
-			panic("Source/Destination traverser has nil sourceTargetCh!")
+		if tqueue == nil {
+			panic("Source/Destination traverser has nil tqueue!")
 		}
 	}
 
@@ -117,13 +117,13 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	go heartbeat()
 
 	if c.isSync && !c.isSource {
-		// Go routine receives dir entries on sourceTargetCh, which till now processed by source traverser.
-		go c.receiveSourceEnumeratedDirs()
+		// Go routine receives dir entries on tqueue, which till now processed by source traverser.
+		go c.receiveOnTqueue()
 
 		// Target traverser follow source traverser, so it needs to wait for directories completed by source traverser.
 		// Target traverse can't come out until source traverser will tell no more entries left. It tells by closing the source and
-		// target communication channel sourceTargetCh.
-		c.isDirsPending = true
+		// target communication channel tqueue.
+		c.mayHaveMoreDirs = true
 	} else {
 		c.unstartedDirs = append(c.unstartedDirs, root)
 	}
@@ -132,7 +132,7 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 
 	if c.isSync && c.isSource {
 		// Source traverser done with enumeration, lets close channel. It will signal the destination traverser about end of enumeration.
-		close(c.sourceTargetCh)
+		close(c.tqueue)
 	}
 
 	close(c.output)
@@ -162,10 +162,17 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 	}
 }
 
-// receiveSourceEnumeratedDirs receive dirs enumerated by source and append to unstartedDirs.
-func (c *crawler) receiveSourceEnumeratedDirs() {
+// receiveOnTqueue receive dirs enumerated by source and append to unstartedDirs.
+func (c *crawler) receiveOnTqueue() {
+	const maxQueueDirectories = 1000 * 1000
 	// Wait for any new entries on channel.
-	for tDir := range c.sourceTargetCh {
+	for tDir := range c.tqueue {
+
+		// Lets put backpressure to source to slow down, otherwise c.unstartedDirs will keep growing and
+		// and cause memory pressure on system.
+		for len(c.unstartedDirs) > maxQueueDirectories {
+			time.Sleep(10 * time.Millisecond)
+		}
 		c.cond.L.Lock()
 		if tDir != nil {
 			c.unstartedDirs = append(c.unstartedDirs, tDir)
@@ -177,15 +184,14 @@ func (c *crawler) receiveSourceEnumeratedDirs() {
 	// There is no way to know if channel is closed or not without interacting with channel.
 	// So, set this flag for target traverser to know source traverser done.
 	c.cond.L.Lock()
-	c.isDirsPending = false
+	c.mayHaveMoreDirs = false
 	c.cond.L.Unlock()
 	c.cond.Broadcast()
 }
 
-const SizeInGB = 1024 * 1024 * 1024
-
 // autoPacerWait do the job of pacemaker between source and target traverser.
 func (c *crawler) autoPacerWait(ctx context.Context) {
+	const SizeInGB = 1024 * 1024 * 1024
 	//
 	// Consider 80% full as low-water-mark. Anything less than 80% full is fair game and we let the source traverser
 	// run full throttle. Once it exceeds low-water-mark we slowly start taking the foot off the pedal and every thread/goroutine
@@ -245,10 +251,20 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	// mutable things involved in our decision making, not one. (The two being c.unstartedDirs and c.dirInProgressCount)
 	c.cond.L.Lock()
 	{
-		// wait while there's nothing to do, and another thread might be going to add something
-		// target traverser needs to wait till source traverser working and might add new entries.
-		for len(c.unstartedDirs) == 0 && (c.dirInProgressCount > 0 || c.isDirsPending) && ctx.Err() == nil {
-			c.cond.Wait()
+		if c.isSync && !c.isSource {
+			// This is sync and target traverser case. If there is no entry in c.unstartedDirs, wait while source traverser enumerate dirs
+			// and add to tqueue. Once source traverser done with enumeration and close the tqueue, which tells source done with enumeration
+			// and there will be no more dirs.We reset the flag mayHaveMoreDirs in that case.
+			// Othwerwise go ahead process dirs in c.unstartedDirs.
+			for len(c.unstartedDirs) == 0 && c.mayHaveMoreDirs && ctx.Err() == nil {
+				c.cond.Wait()
+			}
+		} else {
+			// wait while there's nothing to do, and another thread might be going to add something
+			// target traverser needs to wait till source traverser working and might add new entries.
+			for len(c.unstartedDirs) == 0 && c.dirInProgressCount > 0 && ctx.Err() == nil {
+				c.cond.Wait()
+			}
 		}
 
 		// if we have something to do now, grab it. Else we must be all finished with nothing more to do (ever)
@@ -308,14 +324,14 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	defer c.cond.L.Unlock()
 
 	//
-	// Source traverser MUST add all completed directories to sourceTargetCh, for target traverser to process.
+	// Source traverser MUST add all completed directories to tqueue, for target traverser to process.
 	// Note that c.workerBody() above would have completed enumeration of 'toExamine' dir and hence this is
-	// the right time to add it to sourceTargetCh.
+	// the right time to add it to tqueue.
 	//
 	if c.isSync && c.isSource {
 		if _, ok := toExamine.(string); ok {
 			if _, ok := c.root.(string); ok {
-				c.sourceTargetCh <- common.RelativePath(toExamine.(string), c.root.(string))
+				c.tqueue <- common.RelativePath(toExamine.(string), c.root.(string))
 			}
 		} else {
 			panic("toExamine not string type")
@@ -334,103 +350,7 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	// next contain mostly child directories or if they are "leaf" directories containing mostly just files.  But,
 	// if we slowly reduce parallelism the end state is closer to a single-threaded depth-first traversal, which
 	// is generally fine in terms of memory usage on most folder structures)
-	shouldShutSelfDown := len(c.unstartedDirs) > maxQueueDirectories && // we are getting way too much stuff queued up
-		workerIndex > (c.parallelism/4) && // never shut down the last ones, since we need something left to clear the queue
-		time.Since(c.lastAutoShutdown) > time.Second // adjust somewhat gradually
-	if shouldShutSelfDown {
-		c.lastAutoShutdown = time.Now()
-		return false, bodyErr
-	}
 
-	return true, bodyErr // true because, as far as we know, the work is not finished. And err because it was the err (if any) from THIS dir
-}
-
-// TODO: Need to remove this function as not in-use.
-func (c *crawler) processOneDirectory(ctx context.Context, workerIndex int) (bool, error) {
-	const maxQueueDirectories = 1000 * 1000
-	const maxQueueDirsForBreadthFirst = 100 * 1000 // figure is somewhat arbitrary.  Want it big, but not huge
-
-	var toExamine Directory
-	stop := false
-
-	// Acquire a directory to work on
-	// Note that we need explicit locking because there are two
-	// mutable things involved in our decision making, not one. (The two being c.unstartedDirs and c.dirInProgressCount)
-	c.cond.L.Lock()
-	{
-		// wait while there's nothing to do, and another thread might be going to add something
-		for len(c.unstartedDirs) == 0 && c.dirInProgressCount > 0 && ctx.Err() == nil {
-			c.cond.Wait() // temporarily relinquish the lock (just on this line only) while we wait for a Signal/Broadcast
-		}
-
-		// if we have something to do now, grab it. Else we must be all finished with nothing more to do (ever)
-		stop = ctx.Err() != nil
-		if !stop {
-			if len(c.unstartedDirs) > 0 {
-				if len(c.unstartedDirs) < maxQueueDirsForBreadthFirst {
-					// pop from start of list. This gives a breadth-first flavour to the search.
-					// (Breadth-first is useful for distributing small-file workloads over the full keyspace, which
-					// is can help performance when uploading small files to Azure Blob Storage)
-					toExamine = c.unstartedDirs[0]
-					c.unstartedDirs = c.unstartedDirs[1:]
-				} else {
-					// Fall back to popping from end of list if list is already pretty big.
-					// This gives more of a depth-first flavour to our processing,
-					// which (we think) will prevent c.unstartedDirs getting really large and using too much RAM.
-					// (Since we think that depth first tends to hit leaf nodes relatively quickly, so total number of
-					// unstarted dirs should tend to grow less in a depth first mode)
-					lastIndex := len(c.unstartedDirs) - 1
-					toExamine = c.unstartedDirs[lastIndex]
-					c.unstartedDirs = c.unstartedDirs[:lastIndex]
-				}
-
-				c.dirInProgressCount++ // record that we are working on something
-				c.cond.Broadcast()     // and let other threads know of that fact
-			} else {
-				if c.dirInProgressCount > 0 {
-					// something has gone wrong in the design of this algorithm, because we should only get here if all done now
-					panic("assertion failure: should be no more dirs in progress here")
-				}
-				stop = true
-			}
-		}
-	}
-	c.cond.L.Unlock()
-	if stop {
-		return false, nil
-	}
-
-	// find dir's immediate children (outside the lock, because this could be slow)
-	var foundDirectories = make([]Directory, 0, 16)
-	addDir := func(d Directory) {
-		foundDirectories = append(foundDirectories, d)
-	}
-
-	addOutput := func(de DirectoryEntry, er error) {
-		select {
-		case c.output <- CrawlResult{item: de, err: er}:
-		case <-ctx.Done(): // don't block on full channel if cancelled
-		}
-	}
-
-	bodyErr := c.workerBody(toExamine, addDir, addOutput) // this is the worker body supplied by our caller
-
-	// finally, update shared state (inside the lock)
-	c.cond.L.Lock()
-	defer c.cond.L.Unlock()
-
-	c.unstartedDirs = append(c.unstartedDirs, foundDirectories...) // do NOT try to wait here if unstartedDirs is getting big. May cause deadlocks, due to all workers waiting and none processing the queue
-
-	c.dirInProgressCount-- // we were doing something, and now we have finished it
-	c.cond.Broadcast()     // let other workers know that the state has changed
-
-	// If our queue of unstarted stuff is getting really huge,
-	// reduce our parallelism in the hope of preventing further excessive RAM growth.
-	// (It's impossible to know exactly what to do here, because we don't know whether more workers would _clear_
-	// the queue more quickly; or _add to_ the queue more quickly.  It depends on whether the directories we process
-	// next contain mostly child directories or if they are "leaf" directories containing mostly just files.  But,
-	// if we slowly reduce parallelism the end state is closer to a single-threaded depth-first traversal, which
-	// is generally fine in terms of memory usage on most folder structures)
 	shouldShutSelfDown := len(c.unstartedDirs) > maxQueueDirectories && // we are getting way too much stuff queued up
 		workerIndex > (c.parallelism/4) && // never shut down the last ones, since we need something left to clear the queue
 		time.Since(c.lastAutoShutdown) > time.Second // adjust somewhat gradually
