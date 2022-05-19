@@ -30,7 +30,6 @@ import (
 	"unsafe"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
-	"github.com/pkg/errors"
 )
 
 //
@@ -66,8 +65,16 @@ func newfolderIndexer() *folderIndexer {
 // storedObjectSize function calculates the size of given stored object.
 func storedObjectSize(so StoredObject) int64 {
 
-	return int64(unsafe.Sizeof(StoredObject{})) + int64(len(so.name)+len(so.relativePath)+len(so.contentDisposition)+
-		len(so.cacheControl)+len(so.contentLanguage)+len(so.contentEncoding)+len(so.contentType)+len(so.ContainerName)+len(so.DstContainerName))
+	return int64(unsafe.Sizeof(StoredObject{})) +
+		int64(len(so.name)+
+			len(so.relativePath)+
+			len(so.contentDisposition)+
+			len(so.cacheControl)+
+			len(so.contentLanguage)+
+			len(so.contentEncoding)+
+			len(so.contentType)+
+			len(so.ContainerName)+
+			len(so.DstContainerName))
 }
 
 // folderIndexer.store() is called by Source Traverser for all scanned objects.
@@ -107,18 +114,46 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 		if _, ok := i.folderMap[lcFolderName].indexMap[lcFileName]; !ok {
 			i.folderMap[lcFolderName].indexMap[lcFileName] = storedObject
 		} else {
-			fmt.Printf("FileName [%s] under Folder [%s] already present in map", lcFileName, lcFolderName)
-			return errors.Errorf("FileName [%s] and FolderName [%s] already present in map", lcFileName, lcFolderName)
+			err := fmt.Errorf("FileName [%s] under Folder [%s] already present in map", lcFileName, lcFolderName)
+			return err
 		}
 	}
 
 	/*
-	 * Why we need to this because folder storedObject get deleted as part of parent enumeration, only exception to this
-	 * is root folder. As there will be no parent of root folder. We need storedObject of every folder at time target enumeration
-	 * to detect whether folder changed since last sync time. So we create folder stored object entry in its own folder map with filename
-	 * "." which represent current folder only. Now there will be 2 entries for folder one under parent directory and other one
-	 * under itself. First entry will be deleted at time of parent enueration and second will be deleted at time of self enumeration.
+	 * Why we need this code, please go through this example below. It give you sense of it.
+	 * f.e., for the following source structure,
 	 *
+	 * dir1/dir2/file1.txt
+	 * dir1/dir2/file2.txt
+	 * dir1/file3.txt
+	 *
+	 * above code block will populate the following entries
+	 *
+	 * folderMap["."]["dir1"] "Here . represent the root folder."
+	 * folderMap["dir1"]["dir2"]
+	 * folderMap["dir1/dir2"]["file1.txt"]
+	 * folderMap["dir1/dir2"]["file2.txt"]
+	 * folderMap["dir1"]["file3.txt"]
+	 *
+	 * The source traverser will additionally queue "dir1", "dir1/dir2" to tqueue.
+	 * When target traverser processes "dir1", it does the following:
+	 * 1. It needs the attributes for directory "dir1" for the HasDirectoryChangedSinceLastSync() check.
+	 *    It gets it from folderMap["."]["dir1]" and deletes the entry.
+	 * 2. It processes all children of "dir1", which is "dir1/dir2" and "dir1/file3.txt".
+	 *    It looks up and deletes folderMap["dir1"]["dir2"] and folderMap["dir1"]["file3.txt"].
+	 *
+	 * Now when it dequeues "dir1/dir2" from tqueue, it needs to lookup the attributes for
+	 * "dir1/dir2", for which it looks up folderMap["dir1"]["dir2"] but that has already been deleted above.
+	 *
+	 * To address this need, we need to add two entries in the folderMap for every non-root directory.
+	 * One of them will be looked up by the target traverser when it processes that directory as a child
+	 * of its parent directory, and the other one will be needed when it dequeues it from tqueue and
+	 * wants to get the attributes.
+	 *
+	 * Since we cannot add duplicate keys in the map, we add the 2nd entry like the following:
+	 * folderMap["dir1/dir2"]["."].
+	 *
+	 * The following code does that.
 	 */
 	if storedObject.isVirtualFolder || storedObject.entityType == common.EEntityType.Folder() {
 		lcFolderName = path.Join(lcFolderName, lcFileName)
@@ -127,23 +162,20 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 		}
 		if _, ok := i.folderMap[lcFolderName].indexMap["."]; !ok {
 			i.folderMap[lcFolderName].indexMap["."] = storedObject
+			size += storedObjectSize(storedObject)
 		} else {
-			fmt.Printf("Folder[%s] storedObject already present in map", lcRelativePath)
-			return errors.Errorf("Folder[%s] storedObject already present in map", lcRelativePath)
+			err := fmt.Errorf("Folder[%s] storedObject already present in map", lcRelativePath)
+			return err
 		}
 	}
 
-	/*
-	 * We can do this atomic operation outside of lock too. It reduce the locking time.
-	 * It can lead to some discrepencies where accounting of storedObject delayed.
-	 */
 	atomic.AddInt64(&i.totalSize, size)
 
 	return
 }
 
-// getIndexerMapSize return the size of map.
-func (i *folderIndexer) getIndexerMapSize() int64 {
+// getObjectIndexerMapSize return the size of map.
+func (i *folderIndexer) getObjectIndexerMapSize() int64 {
 	return atomic.LoadInt64(&i.totalSize)
 }
 

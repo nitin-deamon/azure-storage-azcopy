@@ -57,10 +57,10 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 	}
 
 	//
-	// tqueue (communication channel between source and target) will communicate the directories that the Target Traverser
-	// should enumerate. As Source Traverser scans the source it adds "fully enumerated"
-	// directories to tqueue and Target Traverser dequeues from tqueue and processes the
-	// dequeued directories. Both Source and Target traversers need tqueue we pass it to both.
+	// tqueue (communication channel between source and target) will communicate the directories
+	// that the Target Traverser should enumerate. As Source Traverser scans the source it adds
+	// "fully enumerated" directories to tqueue and Target Traverser dequeues from tqueue and processes
+	// the dequeued directories. Both Source and Target traversers need tqueue we pass it to both.
 	// Some important points to know:
 	//
 	// 1. Source Traverser will add a directory to tqueue only after it fully enumerates
@@ -96,7 +96,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 				atomic.AddUint64(&cca.atomicSourceFilesScanned, 1)
 			}
 		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, objectIndexerMap, tqueue, true /* isSource */, true, /* isSync */
-		1 /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime (not used by source traverser) */, cca.cfdMode)
+		cca.maxObjectIndexerMapSizeInGB /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime (not used by source traverser) */, cca.cfdMode)
 
 	if err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			atomic.AddUint64(&cca.atomicDestinationFilesScanned, 1)
 		}
 	}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions,
-		nil /* errorChannel */, objectIndexerMap /*folderIndexerMap */, tqueue, false /* isSource */, true /* isSync */, 0 /* maxObjectIndexerSizeInGB (not used by destination traverse) */, cca.lastSyncTime /* lastSyncTime */, cca.cfdMode)
+		nil /* errorChannel */, objectIndexerMap /*folderIndexerMap */, tqueue, false /* isSource */, true /* isSync */, cca.maxObjectIndexerMapSizeInGB /* maxObjectIndexerSizeInGB (not used by destination traverse) */, cca.lastSyncTime /* lastSyncTime */, cca.cfdMode)
 	if err != nil {
 		return nil, err
 	}

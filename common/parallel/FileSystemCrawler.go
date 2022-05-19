@@ -47,14 +47,14 @@ type DirReader interface {
 // It does not follow symlinks.
 // The items in the CrawResult output channel are FileSystemEntry s.
 // For a wrapper that makes this look more like filepath.Walk, see parallel.Walk.
-func CrawlLocalDirectory(ctx context.Context, root Directory, parallelism int, reader DirReader, getIndexerSize func() int64,
-	tqueue chan interface{}, isSource bool, isSync bool, maxIndexerObjectSizeInGB uint) <-chan CrawlResult {
+func CrawlLocalDirectory(ctx context.Context, root Directory, parallelism int, reader DirReader, getObjectIndexerMapSize func() int64,
+	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32) <-chan CrawlResult {
 	return Crawl(ctx,
 		root,
 		func(dir Directory, enqueueDir func(Directory), enqueueOutput func(DirectoryEntry, error)) error {
 			return enumerateOneFileSystemDirectory(dir, enqueueDir, enqueueOutput, reader)
 		},
-		parallelism, getIndexerSize, tqueue, isSource, isSync, maxIndexerObjectSizeInGB)
+		parallelism, getObjectIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 }
 
 // Walk is similar to filepath.Walk.
@@ -64,7 +64,7 @@ func CrawlLocalDirectory(ctx context.Context, root Directory, parallelism int, r
 // 2. If the return value of walkFunc function is not nil, enumeration will always stop, not matter what the type of the error.
 //    (Unlike filepath.WalkFunc, where returning filePath.SkipDir is handled as a special case).
 func Walk(appCtx context.Context, root string, parallelism int, parallelStat bool, walkFn filepath.WalkFunc,
-	getIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) {
+	getObjectIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	signalRootError := func(e error) {
@@ -106,7 +106,7 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
-	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
+	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getObjectIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
 		entry, err := crawlResult.Item()
 		if err == nil {

@@ -70,7 +70,7 @@ type blobTraverser struct {
 	isSource bool
 
 	// Limit on size of objectIndexerMap in memory.
-	maxObjectIndexerSizeInGB uint
+	maxObjectIndexerSizeInGB uint32
 
 	// lastSyncTime to detect file/folder changed since this time.
 	lastSyncTime time.Time
@@ -341,9 +341,9 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
 	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, func() int64 {
 		if t.indexerMap != nil {
-			return t.indexerMap.getIndexerMapSize()
+			return t.indexerMap.getObjectIndexerMapSize()
 		}
-		panic("ObjectInderMap is nil")
+		panic("ObjectIndexerMap is nil")
 	}, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 
 	for x := range cCrawled {
@@ -447,7 +447,7 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 }
 
 func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
-	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint,
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32,
 	lastSyncTime time.Time, cfdMode CFDModeFlags) (t *blobTraverser) {
 
 	// No need to validate sync params as it's done in crawler.

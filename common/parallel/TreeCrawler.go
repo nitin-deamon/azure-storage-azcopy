@@ -22,6 +22,7 @@ package parallel
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -48,7 +49,7 @@ type crawler struct {
 	tqueue chan interface{}
 
 	isSource                 bool
-	maxObjectIndexerSizeInGB uint
+	maxObjectIndexerSizeInGB uint32
 	mayHaveMoreDirs          bool
 }
 
@@ -73,9 +74,9 @@ type EnumerateOneDirFunc func(dir Directory, enqueueDir func(Directory), enqueue
 // isSource tells whether its source or target traverser.
 // isSync flag tells whether its sync or copy operation.
 // maxObjectIndexerSizeInGB is configurable value tells how much maximum memory ObjectIndexerMap can occupy.
-// tqueue buffer size and maxObjectIndexerSizeInGB determine speed of sync enumeration. As of now tqueue size is fixed to 100*1000 entries.
-// TODO: Need to determine optimal value of tqueue and maxObjectIndexerSizeInGB for ideal case.
-func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getObjectIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint) <-chan CrawlResult {
+// We choose tqueue large enough to not become the bottleneck and hence maxObjectIndexerSizeInGB should be the only
+// one controlling the source traverser speed.
+func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, parallelism int, getObjectIndexerMapSize func() int64, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32) <-chan CrawlResult {
 	c := &crawler{
 		unstartedDirs: make([]Directory, 0, 1024),
 		output:        make(chan CrawlResult, 1000),
@@ -94,6 +95,7 @@ func Crawl(ctx context.Context, root Directory, worker EnumerateOneDirFunc, para
 
 	if isSync {
 		if tqueue == nil {
+			// Both source and target traversers need tqueue, source traverser writes to it and target traverser reads from it.
 			panic("Source/Destination traverser has nil tqueue!")
 		}
 	}
@@ -117,13 +119,13 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 	go heartbeat()
 
 	if c.isSync && !c.isSource {
-		// Go routine receives dir entries on tqueue, which till now processed by source traverser.
-		go c.receiveOnTqueue()
-
 		// Target traverser follow source traverser, so it needs to wait for directories completed by source traverser.
 		// Target traverse can't come out until source traverser will tell no more entries left. It tells by closing the source and
 		// target communication channel tqueue.
 		c.mayHaveMoreDirs = true
+
+		// Go routine receives dir entries on tqueue, which till now processed by source traverser.
+		go c.readTqueue()
 	} else {
 		c.unstartedDirs = append(c.unstartedDirs, root)
 	}
@@ -132,6 +134,7 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 
 	if c.isSync && c.isSource {
 		// Source traverser done with enumeration, lets close channel. It will signal the destination traverser about end of enumeration.
+		fmt.Printf("Closing the tqueue communication channel between source and target")
 		close(c.tqueue)
 	}
 
@@ -162,18 +165,31 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 	}
 }
 
-// receiveOnTqueue receive dirs enumerated by source and append to unstartedDirs.
-func (c *crawler) receiveOnTqueue() {
+//
+// readTqueue() dequeues directory names added by the source traverser and appends them to unstartedDirs.
+// In order to keep the memory requirement in check for the cases when source traverser is going very fast
+// and maxObjectIndexerSizeInGB is not able to clamp it (because there are lot of small directories), we
+// put a limit of 1 Million outstanding directories. After that readTqueue() will not read any more
+// directories from tqueue which will put a back pressure on the source traverser.
+//
+func (c *crawler) readTqueue() {
 	const maxQueueDirectories = 1000 * 1000
-	// Wait for any new entries on channel.
-	for tDir := range c.tqueue {
 
-		// Lets put backpressure to source to slow down, otherwise c.unstartedDirs will keep growing and
-		// and cause memory pressure on system.
-		for len(c.unstartedDirs) > maxQueueDirectories {
-			time.Sleep(10 * time.Millisecond)
-		}
+	for tDir := range c.tqueue {
 		c.cond.L.Lock()
+		//
+		// Lets put backpressure on source to slow down, otherwise c.unstartedDirs will keep growing and and cause memory pressure on system.
+		// Once unstartedDirs crosses the limit we let it drain to 80% of the limit to avoid pointelessely sleeping on every other iteration.
+		// 20% of maxQueueDirectories is 200K directories. Even the fastest target will take multiple seconds to process these many directories,
+		// so we can safely add a largish sleep.
+		//
+		if len(c.unstartedDirs) > maxQueueDirectories {
+			for len(c.unstartedDirs) > maxQueueDirectories*0.8 {
+				c.cond.L.Unlock()
+				time.Sleep(1000 * time.Millisecond)
+				c.cond.L.Lock()
+			}
+		}
 		if tDir != nil {
 			c.unstartedDirs = append(c.unstartedDirs, tDir)
 		}
@@ -181,8 +197,10 @@ func (c *crawler) receiveOnTqueue() {
 		c.cond.Broadcast()
 	}
 
-	// There is no way to know if channel is closed or not without interacting with channel.
-	// So, set this flag for target traverser to know source traverser done.
+	//
+	// Let processOneDirectoryWithAutoPacer() (called by target traverser) know that we have flushed tqueue and no new
+	// directories are expected. Once it processes everything queued to unstartedDirs it may plan to exit.
+	//
 	c.cond.L.Lock()
 	c.mayHaveMoreDirs = false
 	c.cond.L.Unlock()
@@ -219,6 +237,9 @@ func (c *crawler) autoPacerWait(ctx context.Context) {
 	//
 	if mapSizeInBytes < highWaterMark && ctx.Err() == nil {
 		time.Sleep(1 * time.Second)
+		// TODO: As of now crawler dont have knowledge about logger, so that it can log some metrics.
+		// We need to add support of logger in crawler.
+		fmt.Printf("ObjectIndexerMapSize[%v] is between lowerWaterMark[%v] and highWaterMark[%v]", mapSizeInBytes, lowWaterMark, highWaterMark)
 		return
 	}
 
@@ -241,7 +262,7 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	// Before picking a new directory to enumerate, call autoPacerWait() to check if we need to
 	// slow down as the objectIndexer might be getting "too full". If Target Traverser is running
 	// slow causing objectIndexer map to get full, we induce wait to let Target Traverser catch up.
-	// autoPacerWait is applicable in case if it's sync and source traverser.
+	// Only source traverser of the sync process should call auto-pacer to slow itself down.
 	if c.isSync && c.isSource {
 		c.autoPacerWait(ctx)
 	}
@@ -252,16 +273,19 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	c.cond.L.Lock()
 	{
 		if c.isSync && !c.isSource {
-			// This is sync and target traverser case. If there is no entry in c.unstartedDirs, wait while source traverser enumerate dirs
-			// and add to tqueue. Once source traverser done with enumeration and close the tqueue, which tells source done with enumeration
-			// and there will be no more dirs.We reset the flag mayHaveMoreDirs in that case.
-			// Othwerwise go ahead process dirs in c.unstartedDirs.
+
+			//
+			// This is the target traverser of the sync process. It is handled separately since it depends on source
+			// traverser to provide it the directories to process. Others do the normal breadth-first enumeration by
+			// processing directories they have discovered. So, for the target traverser case, we have the following wait criteria:
+			// 1. unstartedDirs is empty. This is where it will get the next directory to process.
+			// 2. mayHaveMoreDirs is true, which means we are not yet done reading from tqueue and hence more new directories may be added by source traverser.
+			//
 			for len(c.unstartedDirs) == 0 && c.mayHaveMoreDirs && ctx.Err() == nil {
 				c.cond.Wait()
 			}
 		} else {
-			// wait while there's nothing to do, and another thread might be going to add something
-			// target traverser needs to wait till source traverser working and might add new entries.
+			// wait while there's nothing to do, and another thread might be going to add something.
 			for len(c.unstartedDirs) == 0 && c.dirInProgressCount > 0 && ctx.Err() == nil {
 				c.cond.Wait()
 			}

@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,9 @@ type rawSyncCmdArgs struct {
 	cpkScopeInfo string
 	// dry run mode bool
 	dryrun bool
+
+	// maxObjectIndexerMapSizeInGB limit on size of ObjectIndexerMap in memory.
+	maxObjectIndexerMapSizeInGB string
 }
 
 func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []string) {
@@ -102,6 +106,28 @@ func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []strin
 	}
 
 	return
+}
+
+func (raw *rawSyncCmdArgs) parseMaxObjectIndexerMapInGb() (uint32, error) {
+
+	// Default case where user not specified any value.
+	if raw.maxObjectIndexerMapSizeInGB == "" {
+		// TODO: Need to add code check system memory and use 30% of that memory.
+		// As of now returning 2 GB.
+		return 2, nil
+	}
+
+	value, err := strconv.Atoi(raw.maxObjectIndexerMapSizeInGB)
+	if value < 0 {
+		err = fmt.Errorf("maxObjectIndexerMapSizeInGb is negative")
+		return 0, err
+	}
+
+	if err != nil {
+		return uint32(value), fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGb with error: %v", err)
+	}
+
+	return uint32(value), nil
 }
 
 // it is assume that the given url has the SAS stripped, and safe to print
@@ -211,6 +237,12 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 	cooked.recursive = raw.recursive
 	cooked.forceIfReadOnly = raw.forceIfReadOnly
 	if err = validateForceIfReadOnly(cooked.forceIfReadOnly, cooked.fromTo); err != nil {
+		return cooked, err
+	}
+
+	// Parse maxObjectIndexerMapSizeInGb
+	cooked.maxObjectIndexerMapSizeInGB, err = raw.parseMaxObjectIndexerMapInGb()
+	if err != nil {
 		return cooked, err
 	}
 
@@ -422,7 +454,11 @@ type cookedSyncCmdArgs struct {
 
 	cfdMode CFDModeFlags
 
+	// lastSyncTime to find out files/Dirs changed since this time depending on CFDMode.
 	lastSyncTime time.Time
+
+	// maxObjectIndexerMapSizeInGB limit on size of ObjectIndexerMap in memory.
+	maxObjectIndexerMapSizeInGB uint32
 }
 
 func (cca *cookedSyncCmdArgs) incrementDeletionCount() {
@@ -793,4 +829,7 @@ func init() {
 	// Deprecate the old persist-smb-permissions flag
 	syncCmd.PersistentFlags().MarkHidden("preserve-smb-permissions")
 	syncCmd.PersistentFlags().BoolVar(&raw.preservePermissions, PreservePermissionsFlag, false, "False by default. Preserves ACLs between aware resources (Windows and Azure Files, or ADLS Gen 2 to ADLS Gen 2). For Hierarchical Namespace accounts, you will need a container SAS or OAuth token with Modify Ownership and Modify Permissions permissions. For downloads, you will also need the --backup flag to restore permissions where the new Owner will not be the user running AzCopy. This flag applies to both files and folders, unless a file-only filter is specified (e.g. include-pattern).")
+
+	// Limit on size of ObjectIndexerMap in memory.
+	syncCmd.PersistentFlags().StringVar(&raw.maxObjectIndexerMapSizeInGB, "maxObjectIndexerMapSizeInGB", "", "maxObjectIndexerMapSizeInGB is the limit of map size in memory, provide the value in terms of GB")
 }

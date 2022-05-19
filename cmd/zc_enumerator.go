@@ -88,16 +88,10 @@ type StoredObject struct {
 	leaseDuration azblob.LeaseDurationType
 
 	// Added for new sync algorithm.
-	// Incase of blob intermediate directory stub marked as virtual directory.
+	// If this StoredObject corresponds to a blob intermediate directory, isVirtualFolder is set to indicate that.
+	// As of now blob intermediate directory set as EntityTypeFile. But we need to make some decision on folder level,
+	// like whether folder changed since lastSyncTime or not and on that basis we do the target traversing.
 	isVirtualFolder bool
-
-	// This flag set once folder enumeration done.
-	isFolderEndMarker bool
-
-	// Archivebit for windows case, which is more reliable to know if file changed
-	// since last sync. So whenever backup or any copy tool do the copy, it set the archiveBit.
-	// Whenever file is modified by application resets the archiveBit.
-	archiveBit bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
@@ -321,7 +315,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
 	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
-	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
@@ -655,7 +649,7 @@ func (e *syncEnumerator) enumerate() (err error) {
 	}()
 
 	/*
-	 * Enumerate the secondary resource and as the objects pass the filters
+	 * Enumerate the secondary resource as directed by the source traverser via tqueue, and as the objects pass the filters
 	 * they will be passed to the object comparator which can process given objects based on what's already indexed
 	 *
 	 * NOTE: transferring can start while scanning is ongoing
