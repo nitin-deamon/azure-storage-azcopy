@@ -96,7 +96,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 				atomic.AddUint64(&cca.atomicSourceFilesScanned, 1)
 			}
 		}, nil, cca.s2sPreserveBlobTags, cca.logVerbosity.ToPipelineLogLevel(), cca.cpkOptions, nil /* errorChannel */, objectIndexerMap, tqueue, true /* isSource */, true, /* isSync */
-		cca.maxObjectIndexerMapSizeInGB /* maxObjectIndexerSizeInGB */, time.Time{} /* lastSyncTime (not used by source traverser) */, cca.cfdMode)
+		cca.maxObjectIndexerMapSizeInGB, time.Time{} /* lastSyncTime (not used by source traverser) */, cca.cfdMode)
 
 	if err != nil {
 		return nil, err
@@ -205,7 +205,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(sourceTraverser, destinationTraverser, objectIndexerMap, filters, comparator, finalize), nil
+		return newSyncEnumerator(sourceTraverser, destinationTraverser, objectIndexerMap, filters, comparator, finalize, tqueue), nil
 	default:
 		objectIndexerMap.isDestinationCaseInsensitive = IsDestinationCaseInsensitive(cca.fromTo)
 		// in all other cases (download and S2S), the destination is scanned/indexed first
@@ -246,7 +246,7 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 			return nil
 		}
 
-		return newSyncEnumerator(destinationTraverser, sourceTraverser, objectIndexerMap, filters, comparator, finalize), nil
+		return newSyncEnumerator(destinationTraverser, sourceTraverser, objectIndexerMap, filters, comparator, finalize, tqueue), nil
 	}
 }
 

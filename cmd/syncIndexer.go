@@ -74,7 +74,8 @@ func storedObjectSize(so StoredObject) int64 {
 			len(so.contentEncoding)+
 			len(so.contentType)+
 			len(so.ContainerName)+
-			len(so.DstContainerName))
+			len(so.DstContainerName)+
+			len(so.md5))
 }
 
 // folderIndexer.store() is called by Source Traverser for all scanned objects.
@@ -89,8 +90,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	// no filesystem allows a file and a folder to have the exact same full path.  This is true of
 	// Linux file systems, Windows, Azure Files and ADLS Gen 2 (and logically should be true of all file systems).
 	var lcFileName, lcFolderName, lcRelativePath string
-
-	size := storedObjectSize(storedObject)
+	var size int64
 
 	if i.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(storedObject.relativePath)
@@ -117,6 +117,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 			err := fmt.Errorf("FileName [%s] under Folder [%s] already present in map", lcFileName, lcFolderName)
 			return err
 		}
+		size = storedObjectSize(storedObject)
 	}
 
 	/*
@@ -184,12 +185,12 @@ func (i *folderIndexer) traverse(processor objectProcessor, filters []ObjectFilt
 	found := false
 
 	if atomic.LoadInt64(&i.totalSize) != 0 {
-		panic(fmt.Sprintf("Total Size should be zero. Size: %v", atomic.LoadInt64(&i.totalSize)))
+		panic(fmt.Sprintf("\n Total Size should be zero. Size: %v", atomic.LoadInt64(&i.totalSize)))
 	}
 
 	for _, folder := range i.folderMap {
 		found = true
-		fmt.Printf("\n Folder with relative path[%s] still in map", folder.folderObject.relativePath)
+		fmt.Printf("\n Folder with relative path[%s] still in map", folder.indexMap["."].relativePath)
 		for _, value := range folder.indexMap {
 			fmt.Printf("\n File with relative path[%s] still in map", value.relativePath)
 		}

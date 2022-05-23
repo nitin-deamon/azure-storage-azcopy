@@ -57,8 +57,13 @@ type Directory interface{}
 type DirectoryEntry interface{}
 
 type CrawlResult struct {
-	item DirectoryEntry
-	err  error
+	item            DirectoryEntry
+	err             error
+	enqueueToTqueue bool
+}
+
+func (r CrawlResult) EnqueueToTqueue() bool {
+	return r.enqueueToTqueue
 }
 
 func (r CrawlResult) Item() (interface{}, error) {
@@ -132,12 +137,6 @@ func (c *crawler) start(ctx context.Context, root Directory) {
 
 	c.runWorkersToCompletion(ctx)
 
-	if c.isSync && c.isSource {
-		// Source traverser done with enumeration, lets close channel. It will signal the destination traverser about end of enumeration.
-		fmt.Printf("Closing the tqueue communication channel between source and target")
-		close(c.tqueue)
-	}
-
 	close(c.output)
 	close(done)
 }
@@ -165,6 +164,8 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 	}
 }
 
+const maxQueueDirectories = 1000 * 1000
+
 //
 // readTqueue() dequeues directory names added by the source traverser and appends them to unstartedDirs.
 // In order to keep the memory requirement in check for the cases when source traverser is going very fast
@@ -173,7 +174,6 @@ func (c *crawler) workerLoop(ctx context.Context, wg *sync.WaitGroup, workerInde
 // directories from tqueue which will put a back pressure on the source traverser.
 //
 func (c *crawler) readTqueue() {
-	const maxQueueDirectories = 1000 * 1000
 
 	for tDir := range c.tqueue {
 		c.cond.L.Lock()
@@ -185,6 +185,7 @@ func (c *crawler) readTqueue() {
 		//
 		if len(c.unstartedDirs) > maxQueueDirectories {
 			for len(c.unstartedDirs) > maxQueueDirectories*0.8 {
+				fmt.Printf("Number of directories in unstartedDirs queue reached max limit:%v.", maxQueueDirectories)
 				c.cond.L.Unlock()
 				time.Sleep(1000 * time.Millisecond)
 				c.cond.L.Lock()
@@ -217,7 +218,8 @@ func (c *crawler) autoPacerWait(ctx context.Context) {
 	// be allowed to proceed. For reasonable sized directories this should ensure that we remain in MaxObjectIndexerSizeInBytes limit
 	// for most practical scenarios. For large/huge directories we might exceed MaxObjectIndexerSizeInBytes by the size of the largest directory.
 	//
-	MaxObjectIndexerSizeInBytes := int64(c.maxObjectIndexerSizeInGB * bytesInGB)
+	MaxObjectIndexerSizeInBytes := int64(c.maxObjectIndexerSizeInGB) * int64(bytesInGB)
+
 	lowWaterMark := (MaxObjectIndexerSizeInBytes * 8) / 10
 
 	highWaterMark := MaxObjectIndexerSizeInBytes
@@ -236,15 +238,17 @@ func (c *crawler) autoPacerWait(ctx context.Context) {
 	//       objectIndexerMap is seen to be growing.
 	//
 	if mapSizeInBytes < highWaterMark && ctx.Err() == nil {
-		time.Sleep(1 * time.Second)
 		// TODO: As of now crawler dont have knowledge about logger, so that it can log some metrics.
 		// We need to add support of logger in crawler.
-		fmt.Printf("ObjectIndexerMapSize[%v] is between lowerWaterMark[%v] and highWaterMark[%v]", mapSizeInBytes, lowWaterMark, highWaterMark)
+		fmt.Printf("\n ObjectIndexerMapSize[%v] is between lowerWaterMark[%v] and highWaterMark[%v]", mapSizeInBytes, lowWaterMark, highWaterMark)
+
+		time.Sleep(1 * time.Second)
 		return
 	}
 
 	// In danger zone. Don't proceed any further without dropping the objectIndexerMap size below lowWaterMark.
 	for mapSizeInBytes > lowWaterMark && ctx.Err() == nil {
+		fmt.Printf("\n [DANGER] ObjectIndexerMapSize[%v] lowerWaterMark[%v] and highWaterMark[%v]", mapSizeInBytes, lowWaterMark, highWaterMark)
 		time.Sleep(1 * time.Second)
 		mapSizeInBytes = c.getObjectIndexerMapSize()
 	}
@@ -253,7 +257,6 @@ func (c *crawler) autoPacerWait(ctx context.Context) {
 }
 
 func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIndex int) (bool, error) {
-	const maxQueueDirectories = 1000 * 1000
 	const maxQueueDirsForBreadthFirst = 100 * 1000 // figure is somewhat arbitrary.  Want it big, but not huge
 
 	var toExamine Directory
@@ -355,7 +358,10 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	if c.isSync && c.isSource {
 		if _, ok := toExamine.(string); ok {
 			if _, ok := c.root.(string); ok {
-				c.tqueue <- common.RelativePath(toExamine.(string), c.root.(string))
+				c.output <- CrawlResult{
+					item:            common.RelativePath(toExamine.(string), c.root.(string)),
+					enqueueToTqueue: true,
+				}
 			}
 		} else {
 			panic("toExamine not string type")

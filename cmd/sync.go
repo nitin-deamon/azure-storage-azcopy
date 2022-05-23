@@ -90,7 +90,14 @@ type rawSyncCmdArgs struct {
 	// dry run mode bool
 	dryrun bool
 
-	// maxObjectIndexerMapSizeInGB limit on size of ObjectIndexerMap in memory.
+	//
+	// Limit on size of ObjectIndexerMap in memory.
+	// This is used only by the sync process and it controls how much the source traverser can fill the ObjectIndexerMap before it has to wait
+	// for target traverser to process and empty it. This should be kept to a value less than the system RAM to avoid thrashing.
+	// If you are not interested in source traverser scanning all the files for estimation purpose you can keep it low, just enough to never have the
+	// target traverser wait for directories to scan. The only reason we would want to keep it high is to let the source complete scanning irrespective
+	// of the target traverser speed, so that the scanned information can then be used for ETA estimation.
+	//
 	maxObjectIndexerMapSizeInGB string
 }
 
@@ -108,23 +115,25 @@ func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []strin
 	return
 }
 
-func (raw *rawSyncCmdArgs) parseMaxObjectIndexerMapInGb() (uint32, error) {
+// TODO: Need to get system available memory and check with this maxObjectIndexerMapSizeInGB. If maxObjectIndexerMapSizeInGB more than
+//       system available memory than issue warning message. If maxObjectIndexerMapSizeInGB is nil, in that case need to set it to 80% of
+//       available memory. Getting system available memory need to be done for both windows and linux.
+func (raw *rawSyncCmdArgs) parseMaxObjectIndexerMapInGB() (uint32, error) {
 
 	// Default case where user not specified any value.
 	if raw.maxObjectIndexerMapSizeInGB == "" {
-		// TODO: Need to add code check system memory and use 30% of that memory.
-		// As of now returning 2 GB.
+		// As of now return 2GB as maxObjectIndexerMapSizeInGB value.
 		return 2, nil
 	}
 
 	value, err := strconv.Atoi(raw.maxObjectIndexerMapSizeInGB)
-	if value < 0 {
-		err = fmt.Errorf("maxObjectIndexerMapSizeInGb is negative")
-		return 0, err
+	if err != nil {
+		return uint32(value), fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGB with error: %v", err)
 	}
 
-	if err != nil {
-		return uint32(value), fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGb with error: %v", err)
+	if value < 0 {
+		err = fmt.Errorf("maxObjectIndexerMapSizeInGB is negative")
+		return 0, err
 	}
 
 	return uint32(value), nil
@@ -240,8 +249,7 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 		return cooked, err
 	}
 
-	// Parse maxObjectIndexerMapSizeInGb
-	cooked.maxObjectIndexerMapSizeInGB, err = raw.parseMaxObjectIndexerMapInGb()
+	cooked.maxObjectIndexerMapSizeInGB, err = raw.parseMaxObjectIndexerMapInGB()
 	if err != nil {
 		return cooked, err
 	}
@@ -454,10 +462,22 @@ type cookedSyncCmdArgs struct {
 
 	cfdMode CFDModeFlags
 
-	// lastSyncTime to find out files/Dirs changed since this time depending on CFDMode.
+	//
+	// Time of last sync, used by the sync process.
+	// This is used as a lower bound to find out files/dirs changed since last sync.
+	// Depending on CFDMode this will be compared with source files' ctime/mtime or
+	// the target files' ctime/mtime.
+	//
 	lastSyncTime time.Time
 
-	// maxObjectIndexerMapSizeInGB limit on size of ObjectIndexerMap in memory.
+	//
+	// Limit on size of ObjectIndexerMap in memory.
+	// This is used only by the sync process and it controls how much the source traverser can fill the ObjectIndexerMap before it has to wait
+	// for target traverser to process and empty it. This should be kept to a value less than the system RAM to avoid thrashing.
+	// If you are not interested in source traverser scanning all the files for estimation purpose you can keep it low, just enough to never have the
+	// target traverser wait for directories to scan. The only reason we would want to keep it high is to let the source complete scanning irrespective
+	// of the target traverser speed, so that the scanned information can then be used for ETA estimation.
+	//
 	maxObjectIndexerMapSizeInGB uint32
 }
 
@@ -831,5 +851,5 @@ func init() {
 	syncCmd.PersistentFlags().BoolVar(&raw.preservePermissions, PreservePermissionsFlag, false, "False by default. Preserves ACLs between aware resources (Windows and Azure Files, or ADLS Gen 2 to ADLS Gen 2). For Hierarchical Namespace accounts, you will need a container SAS or OAuth token with Modify Ownership and Modify Permissions permissions. For downloads, you will also need the --backup flag to restore permissions where the new Owner will not be the user running AzCopy. This flag applies to both files and folders, unless a file-only filter is specified (e.g. include-pattern).")
 
 	// Limit on size of ObjectIndexerMap in memory.
-	syncCmd.PersistentFlags().StringVar(&raw.maxObjectIndexerMapSizeInGB, "maxObjectIndexerMapSizeInGB", "", "maxObjectIndexerMapSizeInGB is the limit of map size in memory, provide the value in terms of GB")
+	syncCmd.PersistentFlags().StringVar(&raw.maxObjectIndexerMapSizeInGB, "max-indexer-map-size-gb", "", "maxObjectIndexerMapSizeInGB is the limit of map size in memory, provide the value in terms of GB")
 }

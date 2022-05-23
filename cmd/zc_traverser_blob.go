@@ -347,6 +347,15 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 	}, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 
 	for x := range cCrawled {
+
+		if x.EnqueueToTqueue() {
+			item, err := x.Item()
+			if err != nil {
+				panic("Error set for entry which needs to be inserted to tqueue")
+			}
+			t.tqueue <- item
+		}
+
 		item, workerError := x.Item()
 		if workerError != nil {
 			cancelWorkers()

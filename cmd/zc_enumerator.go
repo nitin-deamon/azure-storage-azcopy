@@ -46,6 +46,7 @@ import (
 // represent a local or remote resource object (ex: local file, blob, etc.)
 // we can add more properties if needed, as this is easily extensible
 // ** DO NOT instantiate directly, always use newStoredObject ** (to make sure its fully populated and any preprocessor method runs)
+// Note: If you make any changes made to this struct, make sure storedObjectSize() in syncIndexer.go is updated accordingly.
 type StoredObject struct {
 	name             string
 	entityType       common.EntityType
@@ -616,10 +617,15 @@ type syncEnumerator struct {
 
 	// a finalizer that is always called if the enumeration finishes properly
 	finalize func() error
+
+	// tqueue is a commnication channel between source and target traverser.
+	// Source traverser will close this once enumeration done, so that target traverser will
+	// come to know about source done with enumeration.
+	tqueue chan interface{}
 }
 
 func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *folderIndexer,
-	filters []ObjectFilter, comparator objectProcessor, finalize func() error) *syncEnumerator {
+	filters []ObjectFilter, comparator objectProcessor, finalize func() error, tqueue chan interface{}) *syncEnumerator {
 	return &syncEnumerator{
 		primaryTraverser:   primaryTraverser,
 		secondaryTraverser: secondaryTraverser,
@@ -627,6 +633,7 @@ func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, i
 		filters:            filters,
 		objectComparator:   comparator,
 		finalize:           finalize,
+		tqueue:             tqueue,
 	}
 }
 
@@ -645,6 +652,10 @@ func (e *syncEnumerator) enumerate() (err error) {
 	go func() {
 		defer wg.Done()
 		perr = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
+
+		// Source traverser done with enumeration, lets close channel. It will signal the destination traverser about end of enumeration.
+		fmt.Printf("Closing the tqueue communication channel between source and target")
+		close(e.tqueue)
 		return
 	}()
 

@@ -108,6 +108,14 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	}
 	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getObjectIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
+		if crawlResult.EnqueueToTqueue() {
+			entry, err := crawlResult.Item()
+			if err != nil {
+				panic("Error set for entry which needs to be inserted to tqueue")
+			}
+			tqueue <- entry
+			continue
+		}
 		entry, err := crawlResult.Item()
 		if err == nil {
 			fsEntry := entry.(FileSystemEntry)
