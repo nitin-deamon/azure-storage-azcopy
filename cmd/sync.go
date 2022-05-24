@@ -128,11 +128,12 @@ func (raw *rawSyncCmdArgs) parseMaxObjectIndexerMapInGB() (uint32, error) {
 
 	value, err := strconv.Atoi(raw.maxObjectIndexerMapSizeInGB)
 	if err != nil {
-		return uint32(value), fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGB with error: %v", err)
+		err = fmt.Errorf("Parsing failed for maxObjectIndexerMapSizeInGB (%s) with error: %v", raw.maxObjectIndexerMapSizeInGB, err)
+		return uint32(value), err
 	}
 
 	if value < 0 {
-		err = fmt.Errorf("maxObjectIndexerMapSizeInGB is negative")
+		err = fmt.Errorf("maxObjectIndexerMapSizeInGB is negative: %s", raw.maxObjectIndexerMapSizeInGB)
 		return 0, err
 	}
 

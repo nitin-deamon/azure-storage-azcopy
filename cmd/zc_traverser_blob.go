@@ -349,10 +349,19 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 	for x := range cCrawled {
 
 		if x.EnqueueToTqueue() {
+			// Do the sanity check, EnqueueToTqueue should be true in case of sync operation and traverser is source.
+			if !t.isSync || !t.isSource {
+				panic(fmt.Sprintf("Entry set for enqueue to tqueue for invalid operation, isSync[%v], isSource[%v]", t.isSync, t.isSource))
+			}
+
 			item, err := x.Item()
 			if err != nil {
-				panic("Error set for entry which needs to be inserted to tqueue")
+				panic(fmt.Sprintf("Error set for entry which needs to be inserted to tqueue: %v", err))
 			}
+
+			//
+			// This is a special CrawlResult which signifies that we need to enqueue the given directory to tqueue for target traverser to process.
+			//
 			t.tqueue <- item
 		}
 

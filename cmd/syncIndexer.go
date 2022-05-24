@@ -107,6 +107,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	// Very first object scanned in the folder, create the objectIndexer for this folder.
 	if _, ok := i.folderMap[lcFolderName]; !ok {
 		i.folderMap[lcFolderName] = newObjectIndexer()
+		size += int64(unsafe.Sizeof(objectIndexer{}))
 	}
 
 	// Create child entry for file/folder. For root folder this is not applicable as its not child of anyone.
@@ -160,6 +161,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 		lcFolderName = path.Join(lcFolderName, lcFileName)
 		if _, ok := i.folderMap[lcFolderName]; !ok {
 			i.folderMap[lcFolderName] = newObjectIndexer()
+			size += int64(unsafe.Sizeof(objectIndexer{}))
 		}
 		if _, ok := i.folderMap[lcFolderName].indexMap["."]; !ok {
 			i.folderMap[lcFolderName].indexMap["."] = storedObject
@@ -208,9 +210,9 @@ func (i *folderIndexer) traverse(processor objectProcessor, filters []ObjectFilt
 // 		1. objectProcessor: accumulate a lookup map with given StoredObjects
 //		2. resourceTraverser: go through the entities in the map like a traverser
 type objectIndexer struct {
-	indexMap     map[string]StoredObject
-	counter      int
-	folderObject StoredObject
+	indexMap map[string]StoredObject
+	counter  int
+
 	// isDestinationCaseInsensitive is true when the destination is case-insensitive
 	// In Windows, both paths D:\path\to\dir and D:\Path\TO\DiR point to the same resource.
 	// Apple File System (APFS) can be configured to be case-sensitive or case-insensitive.

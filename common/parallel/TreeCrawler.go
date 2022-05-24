@@ -57,8 +57,15 @@ type Directory interface{}
 type DirectoryEntry interface{}
 
 type CrawlResult struct {
-	item            DirectoryEntry
-	err             error
+	item DirectoryEntry
+	err  error
+	//
+	// This is special case where an 'item' (which is a directory in this case), needs to be added to tqueue.
+	// This is applicable only in case of sync and source traverser. This special CrawlResult will be generated
+	// by the source traverser, after it completes enumeration of a directory.
+	// Reason for this adding here is, source traverser should tell target traverser about directory only when
+	// it completes enumeration and stores it's entries in ObjectIndexerMap.
+	//
 	enqueueToTqueue bool
 }
 
@@ -185,7 +192,7 @@ func (c *crawler) readTqueue() {
 		//
 		if len(c.unstartedDirs) > maxQueueDirectories {
 			for len(c.unstartedDirs) > maxQueueDirectories*0.8 {
-				fmt.Printf("Number of directories in unstartedDirs queue reached max limit:%v.", maxQueueDirectories)
+				fmt.Printf("Number of directories in unstartedDirs queue reached high water mark (%v): %v", maxQueueDirectories*0.8, len(c.unstartedDirs))
 				c.cond.L.Unlock()
 				time.Sleep(1000 * time.Millisecond)
 				c.cond.L.Lock()
@@ -358,6 +365,11 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 	if c.isSync && c.isSource {
 		if _, ok := toExamine.(string); ok {
 			if _, ok := c.root.(string); ok {
+				//
+				// Add a special CrawlResult telling caller to enqueue this directory to tqueue for processing by the target traverser.
+				// Note that we don't enqueue it here but instead ask the caller to enqueue, to ensure that we add a directory to tqueue
+				// only after all the directory children have been added to the objectIndexer map.
+				//
 				c.output <- CrawlResult{
 					item:            common.RelativePath(toExamine.(string), c.root.(string)),
 					enqueueToTqueue: true,

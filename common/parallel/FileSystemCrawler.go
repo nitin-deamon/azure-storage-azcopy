@@ -22,6 +22,7 @@ package parallel
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,10 +110,18 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	ch := CrawlLocalDirectory(ctx, root, remainingParallelism, reader, getObjectIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	for crawlResult := range ch {
 		if crawlResult.EnqueueToTqueue() {
+			// Do the sanity check, EnqueueToTqueue should be true in case of sync operation and traverser is source.
+			if isSync || isSource {
+				panic(fmt.Sprintf("Entry set for enqueue to tqueue for invalid operation, isSync[%v], isSource[%v]", isSync, isSource))
+			}
+
 			entry, err := crawlResult.Item()
 			if err != nil {
 				panic("Error set for entry which needs to be inserted to tqueue")
 			}
+			//
+			// This is a special CrawlResult which signifies that we need to enqueue the given directory to tqueue for target traverser to process.
+			//
 			tqueue <- entry
 			continue
 		}

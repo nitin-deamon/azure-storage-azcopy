@@ -618,9 +618,9 @@ type syncEnumerator struct {
 	// a finalizer that is always called if the enumeration finishes properly
 	finalize func() error
 
-	// tqueue is a commnication channel between source and target traverser.
-	// Source traverser will close this once enumeration done, so that target traverser will
-	// come to know about source done with enumeration.
+	// tqueue is a commnication channel between source and target traverser. tqueue channel added to syncEnumerator should be the same
+	// one that's added to source and target traverser objects. Source traverser will close this once enumeration done, so that target
+	// traverser will come to know about source done with enumeration.
 	tqueue chan interface{}
 }
 
