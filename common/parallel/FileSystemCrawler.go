@@ -111,7 +111,7 @@ func Walk(appCtx context.Context, root string, parallelism int, parallelStat boo
 	for crawlResult := range ch {
 		if crawlResult.EnqueueToTqueue() {
 			// Do the sanity check, EnqueueToTqueue should be true in case of sync operation and traverser is source.
-			if isSync || isSource {
+			if !isSync || !isSource {
 				panic(fmt.Sprintf("Entry set for enqueue to tqueue for invalid operation, isSync[%v], isSource[%v]", isSync, isSource))
 			}
 

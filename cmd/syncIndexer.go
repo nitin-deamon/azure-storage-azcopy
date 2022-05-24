@@ -211,7 +211,8 @@ func (i *folderIndexer) traverse(processor objectProcessor, filters []ObjectFilt
 //		2. resourceTraverser: go through the entities in the map like a traverser
 type objectIndexer struct {
 	indexMap map[string]StoredObject
-	counter  int
+
+	counter int
 
 	// isDestinationCaseInsensitive is true when the destination is case-insensitive
 	// In Windows, both paths D:\path\to\dir and D:\Path\TO\DiR point to the same resource.
