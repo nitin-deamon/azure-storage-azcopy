@@ -56,6 +56,13 @@ func (cca *cookedSyncCmdArgs) initEnumerator(ctx context.Context) (enumerator *s
 		}
 	}
 
+	// Note: As of now we only support source as local and target as blob.
+	//
+	// TODO: Need to add support for other source and targets.
+	if cca.fromTo.From() != common.ELocation.Local() && cca.fromTo.To() != common.ELocation.Blob() {
+		panic("New sync algorithm only support source as local and target as blob")
+	}
+
 	//
 	// tqueue (communication channel between source and target) will communicate the directories
 	// that the Target Traverser should enumerate. As Source Traverser scans the source it adds
