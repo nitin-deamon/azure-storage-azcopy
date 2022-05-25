@@ -380,6 +380,8 @@ func (c *crawler) processOneDirectoryWithAutoPacer(ctx context.Context, workerIn
 		}
 
 		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...)
+	} else if !c.isSync {
+		c.unstartedDirs = append(c.unstartedDirs, foundDirectories...)
 	}
 
 	c.dirInProgressCount-- // we were doing something, and now we have finished it
