@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
 
@@ -55,6 +56,28 @@ type blobTraverser struct {
 	s2sPreserveSourceTags bool
 
 	cpkOptions common.CpkOptions
+
+	// Fields applicable only to sync operation.
+	// isSync boolean tells whether its copy operation or sync operation.
+	isSync bool
+
+	// Hierarchical map of files and folders seen on source side.
+	indexerMap *folderIndexer
+	// Communication channel between source and destination traverser.
+	tqueue chan interface{}
+
+	// For sync operation this falg tells whether this is source or target.
+	isSource bool
+
+	// Limit on size of objectIndexerMap in memory.
+	maxObjectIndexerSizeInGB uint32
+
+	// lastSyncTime to detect file/folder changed since this time.
+	lastSyncTime time.Time
+
+	// cfdMode is change file detection mode. How to detect the file/folder changed.
+	// Changed files can be detected on basisi of ctime, ctimemtime , archiveBit or none.
+	cfdMode CFDModeFlags
 }
 
 func (t *blobTraverser) IsDirectory(isSource bool) bool {
@@ -316,9 +339,32 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 	// initiate parallel scanning, starting at the root path
 	workerContext, cancelWorkers := context.WithCancel(t.ctx)
-	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism)
+	cCrawled := parallel.Crawl(workerContext, searchPrefix+extraSearchPrefix, enumerateOneDir, EnumerationParallelism, func() int64 {
+		if t.indexerMap != nil {
+			return t.indexerMap.getObjectIndexerMapSize()
+		}
+		panic("ObjectIndexerMap is nil")
+	}, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 
 	for x := range cCrawled {
+
+		if x.EnqueueToTqueue() {
+			// Do the sanity check, EnqueueToTqueue should be true in case of sync operation and traverser is source.
+			if !t.isSync || !t.isSource {
+				panic(fmt.Sprintf("Entry set for enqueue to tqueue for invalid operation, isSync[%v], isSource[%v]", t.isSync, t.isSource))
+			}
+
+			item, err := x.Item()
+			if err != nil {
+				panic(fmt.Sprintf("Error set for entry which needs to be inserted to tqueue: %v", err))
+			}
+
+			//
+			// This is a special CrawlResult which signifies that we need to enqueue the given directory to tqueue for target traverser to process.
+			//
+			t.tqueue <- item
+		}
+
 		item, workerError := x.Item()
 		if workerError != nil {
 			cancelWorkers()
@@ -418,7 +464,11 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 	return nil
 }
 
-func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, s2sPreserveSourceTags bool, cpkOptions common.CpkOptions) (t *blobTraverser) {
+func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
+	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32,
+	lastSyncTime time.Time, cfdMode CFDModeFlags) (t *blobTraverser) {
+
+	// No need to validate sync params as it's done in crawler.
 	t = &blobTraverser{
 		rawURL:                      rawURL,
 		p:                           p,
@@ -429,6 +479,15 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		parallelListing:             true,
 		s2sPreserveSourceTags:       s2sPreserveSourceTags,
 		cpkOptions:                  cpkOptions,
+
+		// Sync related fields.
+		isSync:                   isSync,
+		indexerMap:               indexerMap,
+		tqueue:                   tqueue,
+		isSource:                 isSource,
+		lastSyncTime:             lastSyncTime,
+		cfdMode:                  cfdMode,
+		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
 	}
 
 	if strings.ToLower(glcm.GetEnvironmentVariable(common.EEnvironmentVariable.DisableHierarchicalScanning())) == "true" {

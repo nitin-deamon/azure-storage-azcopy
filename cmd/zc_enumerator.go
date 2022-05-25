@@ -46,6 +46,7 @@ import (
 // represent a local or remote resource object (ex: local file, blob, etc.)
 // we can add more properties if needed, as this is easily extensible
 // ** DO NOT instantiate directly, always use newStoredObject ** (to make sure its fully populated and any preprocessor method runs)
+// Note: If you make any changes made to this struct, make sure storedObjectSize() in syncIndexer.go is updated accordingly.
 type StoredObject struct {
 	name             string
 	entityType       common.EntityType
@@ -86,6 +87,12 @@ type StoredObject struct {
 	leaseState    azblob.LeaseStateType
 	leaseStatus   azblob.LeaseStatusType
 	leaseDuration azblob.LeaseDurationType
+
+	// Added for new sync algorithm.
+	// If this StoredObject corresponds to a blob intermediate directory, isVirtualFolder is set to indicate that.
+	// As of now blob intermediate directory set as EntityTypeFile. But we need to make some decision on folder level,
+	// like whether folder changed since lastSyncTime or not and on that basis we do the target traversing.
+	isVirtualFolder bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
@@ -303,17 +310,19 @@ type enumerationCounterFunc func(entityType common.EntityType)
 // errorOnDirWOutRecursive is used by copy.
 // If errorChannel is non-nil, all errors encountered during enumeration will be conveyed through this channel.
 // To avoid slowdowns, use a buffered channel of enough capacity.
-
+// tqueue is communication channel b/w source and destination and required in case of sync, maxObjectIndexerSizeInGB for auto pacing.
+// lastSyncTime and CFDModeFlags for change detection.
 func InitResourceTraverser(resource common.ResourceString, location common.Location, ctx *context.Context,
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
-	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo) (ResourceTraverser, error) {
+	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
 	// Clean up the resource if it's a local path
 	if location == common.ELocation.Local() {
-		resource = common.ResourceString{Value: cleanLocalPath(resource.ValueLocal())}
+		resource = common.ResourceString{Value: common.CleanLocalPath(resource.ValueLocal())}
 	}
 
 	// Initialize the pipeline if creds and ctx is provided
@@ -371,11 +380,12 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				}
 			}()
 
-			baseResource := resource.CloneWithValue(cleanLocalPath(basePath))
+			baseResource := resource.CloneWithValue(common.CleanLocalPath(basePath))
 			output = newListTraverser(baseResource, location, nil, nil, recursive, toFollow, getProperties,
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {
-			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel)
+			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue,
+				isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
 		}
 	case common.ELocation.Benchmark():
 		ben, err := newBenchmarkTraverser(resource.Value, incrementEnumerationCounter)
@@ -408,7 +418,9 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 		} else if listOfVersionIds != nil {
 			output = newBlobVersionsTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, listOfVersionIds, cpkOptions)
 		} else {
-			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions)
+			// TODO: Need to add error channel in case of blob traverse.
+			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions, indexerMap,
+				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
 		}
 	case common.ELocation.File():
 		resourceURL, err := resource.FullURL()
@@ -593,7 +605,7 @@ type syncEnumerator struct {
 	secondaryTraverser ResourceTraverser
 
 	// the results from the primary traverser would be stored here
-	objectIndexer *objectIndexer
+	objectIndexer *folderIndexer
 
 	// general filters apply to both the primary and secondary traverser
 	filters []ObjectFilter
@@ -605,10 +617,15 @@ type syncEnumerator struct {
 
 	// a finalizer that is always called if the enumeration finishes properly
 	finalize func() error
+
+	// tqueue is a commnication channel between source and target traverser. tqueue channel added to syncEnumerator should be the same
+	// one that's added to source and target traverser objects. Source traverser will close this once enumeration done, so that target
+	// traverser will come to know about source done with enumeration.
+	tqueue chan interface{}
 }
 
-func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *objectIndexer,
-	filters []ObjectFilter, comparator objectProcessor, finalize func() error) *syncEnumerator {
+func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, indexer *folderIndexer,
+	filters []ObjectFilter, comparator objectProcessor, finalize func() error, tqueue chan interface{}) *syncEnumerator {
 	return &syncEnumerator{
 		primaryTraverser:   primaryTraverser,
 		secondaryTraverser: secondaryTraverser,
@@ -616,26 +633,65 @@ func newSyncEnumerator(primaryTraverser, secondaryTraverser ResourceTraverser, i
 		filters:            filters,
 		objectComparator:   comparator,
 		finalize:           finalize,
+		tqueue:             tqueue,
 	}
 }
 
 func (e *syncEnumerator) enumerate() (err error) {
-	// enumerate the primary resource and build lookup map
-	err = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
-	if err != nil {
+	/*
+	 * This is the new streaming directory-at-a-time sync processor. It starts the source and target traversers simultaneously where source
+	 * traverser feeds the target traverser with directories to process and target traverser processes one directory at a time looking for
+	 * changes in that directory. Depending on the CFDMode in use the target traverser may not need to enumerate the target directory for
+	 * finding changed files. Source and target traverser proceed in lockstep manner and only as fast as the slower of the two.
+	 */
+	var wg sync.WaitGroup
+	var perr, serr error
+
+	// Start the source traverser.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		perr = e.primaryTraverser.Traverse(noPreProccessor, e.objectIndexer.store, e.filters)
+
+		// Source traverser done with enumeration, lets close channel. It will signal the destination traverser about end of enumeration.
+		fmt.Printf("Closing the tqueue communication channel between source and target")
+		close(e.tqueue)
+		return
+	}()
+
+	/*
+	 * Enumerate the secondary resource as directed by the source traverser via tqueue, and as the objects pass the filters
+	 * they will be passed to the object comparator which can process given objects based on what's already indexed
+	 *
+	 * NOTE: transferring can start while scanning is ongoing
+	 */
+
+	// Start the target traverser.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		serr = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
+		return
+	}()
+
+	// Wait for the enumeration process to complete.
+	wg.Wait()
+
+	if perr != nil {
+		err = perr
 		return
 	}
 
-	// enumerate the secondary resource and as the objects pass the filters
-	// they will be passed to the object comparator
-	// which can process given objects based on what's already indexed
-	// note: transferring can start while scanning is ongoing
-	err = e.secondaryTraverser.Traverse(noPreProccessor, e.objectComparator, e.filters)
-	if err != nil {
+	if serr != nil {
+		err = serr
 		return
 	}
 
-	// execute the finalize func which may perform useful clean up steps
+	/*
+	 * The new directory-at-a-time sync processor finalizes every directory as it's processed,
+	 * so this finalize() called at the end of the sync process doesn't really do anything
+	 * other than verifying that the sync had indeed completed as expected.
+	 */
 	err = e.finalize()
 	if err != nil {
 		return

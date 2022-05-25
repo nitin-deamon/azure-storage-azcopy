@@ -26,10 +26,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common/parallel"
@@ -40,9 +40,37 @@ type localTraverser struct {
 	recursive      bool
 	followSymlinks bool
 	appCtx         *context.Context
+
 	// a generic function to notify that a new stored object has been enumerated
 	incrementEnumerationCounter enumerationCounterFunc
 	errorChannel                chan ErrorFileInfo
+
+	// Field applicable to only sync operation.
+	// isSync boolean tells whether its copy operation or sync operation.
+	isSync bool
+
+	// When localTraverser is the source traverser it populates this and when it's the target traverser it consumes this.
+	indexerMap *folderIndexer
+
+	// Communication channel between source and destination traverser.
+	// When localTraverser is the source traverser it adds scanned directories to this and
+	// when it's the target traverser it reads directories to process from this channel.
+	tqueue chan interface{}
+
+	// For sync operation this flag tells whether this is source or target.
+	isSource bool
+
+	// Limit on size of objectIndexerMap in memory.
+	maxObjectIndexerSizeInGB uint32
+
+	// lastSyncTime to detect file/folder changed since this time.
+	// Only used when localTraverser is the target traverser.
+	lastSyncTime time.Time
+
+	// cfdMode is change file detection mode. How to detect the file/folder changed.
+	// Changed files can be detected on basis of ctime, ctimemtime , archiveBit or none.
+	// Only used when localTraverser is the target traverser.
+	cfdMode CFDModeFlags
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -178,7 +206,8 @@ func (s symlinkTargetFileInfo) Name() string {
 // Separate this from the traverser for two purposes:
 // 1) Cleaner code
 // 2) Easier to test individually than to test the entire traverser.
-func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo) (err error) {
+func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath.WalkFunc, followSymlinks bool, errorChannel chan ErrorFileInfo, getObjectIndexerMapSize func() int64,
+	tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32) (err error) {
 
 	// We want to re-queue symlinks up in their evaluated form because filepath.Walk doesn't evaluate them for us.
 	// So, what is the plan of attack?
@@ -216,8 +245,8 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 				}
 				return nil
 			}
-			computedRelativePath := strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(queueItem.fullPath))
-			computedRelativePath = cleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
+			computedRelativePath := strings.TrimPrefix(common.CleanLocalPath(filePath), common.CleanLocalPath(queueItem.fullPath))
+			computedRelativePath = common.CleanLocalPath(common.GenerateFullPath(queueItem.relativeBase, computedRelativePath))
 			computedRelativePath = strings.TrimPrefix(computedRelativePath, common.AZCOPY_PATH_SEPARATOR_STRING)
 
 			if computedRelativePath == "." {
@@ -357,7 +386,7 @@ func WalkWithSymlinks(appCtx context.Context, fullPath string, walkFunc filepath
 					return nil
 				}
 			}
-		})
+		}, getObjectIndexerMapSize, tqueue, isSource, isSync, maxObjectIndexerSizeInGB)
 	}
 	return
 }
@@ -394,6 +423,20 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 		return err
 	} else {
 		if t.recursive {
+
+			//
+			// getObjectIndexerMapSize() will be used (only) when localTraverser is the source traverser in the sync process.
+			// It will use it for auto-pacing to ensure the indexer size remains in check.
+			//
+			getObjectIndexerMapSize := func() int64 {
+				if t.indexerMap != nil {
+					return t.indexerMap.getObjectIndexerMapSize()
+				}
+
+				// Though t.indexerMap will be nil for the copy case, but we won't be called in that case.
+				panic("ObjectIndexerMap is nil")
+			}
+
 			processFile := func(filePath string, fileInfo os.FileInfo, fileError error) error {
 				if fileError != nil {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Accessing %s failed with error: %s", filePath, fileError))
@@ -412,7 +455,7 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					entityType = common.EEntityType.File()
 				}
 
-				relPath := strings.TrimPrefix(strings.TrimPrefix(cleanLocalPath(filePath), cleanLocalPath(t.fullPath)), common.DeterminePathSeparator(t.fullPath))
+				relPath := common.RelativePath(filePath, t.fullPath)
 				if !t.followSymlinks && fileInfo.Mode()&os.ModeSymlink != 0 {
 					WarnStdoutAndScanningLog(fmt.Sprintf("Skipping over symlink at %s because --follow-symlinks is false", common.GenerateFullPath(t.fullPath, relPath)))
 					return nil
@@ -435,15 +478,14 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 						noBlobProps,
 						noMetdata,
 						"", // Local has no such thing as containers
-					),
-					processor)
+					), processor)
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
 			if t.appCtx != nil {
-				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(*t.appCtx, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getObjectIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			} else {
-				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel)
+				return WalkWithSymlinks(nil, t.fullPath, processFile, t.followSymlinks, t.errorChannel, getObjectIndexerMapSize, t.tqueue, t.isSource, t.isSync, t.maxObjectIndexerSizeInGB)
 			}
 		} else {
 			// if recursive is off, we only need to scan the files immediately under the fullPath
@@ -522,35 +564,25 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 	return
 }
 
-func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc, errorChannel chan ErrorFileInfo) *localTraverser {
+func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdModes CFDModeFlags) *localTraverser {
+	// No need to validate sync parameters here as it will be done crawler.
 	traverser := localTraverser{
-		fullPath:                    cleanLocalPath(fullPath),
+		fullPath:                    common.CleanLocalPath(fullPath),
 		recursive:                   recursive,
 		followSymlinks:              followSymlinks,
 		appCtx:                      ctx,
 		incrementEnumerationCounter: incrementEnumerationCounter,
-		errorChannel:                errorChannel}
+		errorChannel:                errorChannel,
+
+		// Sync related fields.
+		isSync:                   isSync,
+		indexerMap:               indexerMap,
+		tqueue:                   tqueue,
+		isSource:                 isSource,
+		lastSyncTime:             lastSyncTime,
+		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
+	}
+
 	return &traverser
-}
-
-func cleanLocalPath(localPath string) string {
-	localPathSeparator := common.DeterminePathSeparator(localPath)
-	// path.Clean only likes /, and will only handle /. So, we consolidate it to /.
-	// it will do absolutely nothing with \.
-	normalizedPath := path.Clean(strings.ReplaceAll(localPath, localPathSeparator, common.AZCOPY_PATH_SEPARATOR_STRING))
-	// return normalizedPath path separator.
-	normalizedPath = strings.ReplaceAll(normalizedPath, common.AZCOPY_PATH_SEPARATOR_STRING, localPathSeparator)
-
-	// path.Clean steals the first / from the // or \\ prefix.
-	if strings.HasPrefix(localPath, `\\`) || strings.HasPrefix(localPath, `//`) {
-		// return the \ we stole from the UNC/extended path.
-		normalizedPath = localPathSeparator + normalizedPath
-	}
-
-	// path.Clean steals the last / from C:\, C:/, and does not add one for C:
-	if common.RootDriveRegex.MatchString(strings.ReplaceAll(common.ToShortPath(normalizedPath), common.OS_PATH_SEPARATOR, common.AZCOPY_PATH_SEPARATOR_STRING)) {
-		normalizedPath += common.OS_PATH_SEPARATOR
-	}
-
-	return normalizedPath
 }
