@@ -51,6 +51,7 @@ type StoredObject struct {
 	name             string
 	entityType       common.EntityType
 	lastModifiedTime time.Time
+	lastChangeTime   time.Time
 	size             int64
 	md5              []byte
 	blobType         azblob.BlobType // will be "None" when unknown or not applicable
@@ -93,6 +94,8 @@ type StoredObject struct {
 	// As of now blob intermediate directory set as EntityTypeFile. But we need to make some decision on folder level,
 	// like whether folder changed since lastSyncTime or not and on that basis we do the target traversing.
 	isVirtualFolder bool
+
+	isFolderEndMarker bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
@@ -316,7 +319,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
 	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
-	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode CFDModeFlags) (ResourceTraverser, error) {
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode common.CFDMode, metaDataSyncOnly bool) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
@@ -385,7 +388,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {
 			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue,
-				isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
+				isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataSyncOnly)
 		}
 	case common.ELocation.Benchmark():
 		ben, err := newBenchmarkTraverser(resource.Value, incrementEnumerationCounter)
@@ -420,7 +423,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 		} else {
 			// TODO: Need to add error channel in case of blob traverse.
 			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions, indexerMap,
-				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode)
+				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataSyncOnly)
 		}
 	case common.ELocation.File():
 		resourceURL, err := resource.FullURL()
