@@ -178,22 +178,15 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 
 			// This will happen if folder not present on target. Lets create folder first and then files.
 			if folderPresent {
-				if lcFolderName != "" {
-					panic(fmt.Sprintf("Code should not reach here, except for root folder. LcFolderName: %s", lcFolderName))
-				}
-				storedObject := foldermap.indexMap[lcFileName]
-				size += storedObjectSize(storedObject)
-				delete(foldermap.indexMap, lcFileName)
-				// This is more valid in case of azure files. Where we need to create empty folder too.
-				// So it may happen root folder is empty and target side we need to create folder under some container.
-				// As of now azcopy don't support empty folders so this is not required.
-				f.copyTransferScheduler(storedObject)
-
-				// Delete the parent map of folder if it's empty.
-				if len(f.sourceFolderIndex.folderMap[lcFolderName].indexMap) == 0 {
-					size := int64(unsafe.Sizeof(objectIndexer{}))
-					atomic.AddInt64(&f.sourceFolderIndex.totalSize, -size)
-					delete(f.sourceFolderIndex.folderMap, lcFolderName)
+				if lcRelativePath != "" {
+					// We should not find this entry as it should be removed as part of parent enumeration only exception to this is root folder (that's what we checking in if statement).
+					// But due to go routine scheduling it may happen before parent enumeration at target finish or even start, other goroutine picked the child entry and finish the enumeration.
+					// In that case we don't need to do anything. If folder is empty and don't exist then will be created as parent enumeration done.
+					// If folder is not empty then it will be created by it's children. Only thing, it's metadata will be set by parent only as it has the required info.
+					fmt.Printf("lcRelativePath[%s], We should not find this entry as it should be removed as part of parent enumeration."+
+						"\n But due to go routine scheduling it may happen before parent enumeration at target finish child done with enumeration."+
+						"\n If folder is empty and don't exist then will be created as parent enumeration done. Otherwise will be created by its child enumeration."+
+						"\n Its metadata will be set by parent only as it has the required info.", lcRelativePath)
 				}
 			}
 

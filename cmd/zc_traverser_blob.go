@@ -265,6 +265,9 @@ func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, contai
 		if so.lastChangeTime.After(t.lastSyncTime) {
 			return true
 		} else if t.metaDataOnlySync && t.indexerMap.filesChangedInDirectory(so.relativePath, t.lastSyncTime) {
+			// Listing of blob gives properties and each list api gives 5K blobs in single rest call. So if we know any file changed on source,
+			// We should list the target. It's optimization instead of getting properties for changed files one by one get properties of all blob.
+			// As in normal scenario, there will be less than 2K files in a folder. It make sense to call list api, if any file changed on source.
 			return true
 		} else {
 			return false
@@ -331,6 +334,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 						resp, err := fblobURL.GetProperties(t.ctx, azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
 						// TODO: Need to debug why its giving error here.
 						if err == nil {
+							extendedProp, _ := common.ReadStatFromMetadata(resp.NewMetadata(), resp.ContentLength())
 							storedObject := newStoredObject(
 								preprocessor,
 								getObjectNameOnly(strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING)),
@@ -343,6 +347,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 								common.FromAzBlobMetadataToCommonMetadata(resp.NewMetadata()),
 								containerName,
 							)
+							storedObject.lastChangeTime = extendedProp.CTime()
 							storedObject.isVirtualFolder = true
 							if t.s2sPreserveSourceTags {
 								var BlobTags *azblob.BlobTags
@@ -371,7 +376,8 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				}
 
 				storedObject := t.createStoredObjectForBlob(preprocessor, blobInfo, strings.TrimPrefix(blobInfo.Name, searchPrefix), containerName)
-
+				extendedProp, _ := common.ReadStatFromMetadata(blobInfo.Metadata, *blobInfo.Properties.ContentLength)
+				storedObject.lastChangeTime = extendedProp.CTime()
 				if t.s2sPreserveSourceTags && blobInfo.BlobTags != nil {
 					blobTagsMap := common.BlobTags{}
 					for _, blobTag := range blobInfo.BlobTags.BlobTagSet {

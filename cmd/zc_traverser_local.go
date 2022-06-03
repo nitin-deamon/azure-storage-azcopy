@@ -406,7 +406,6 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 		if t.incrementEnumerationCounter != nil {
 			t.incrementEnumerationCounter(common.EEntityType.File())
 		}
-
 		err := processIfPassedFilters(filters,
 			newStoredObject(
 				preprocessor,
