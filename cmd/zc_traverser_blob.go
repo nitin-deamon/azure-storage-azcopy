@@ -239,19 +239,23 @@ func (t *blobTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 	return t.serialList(containerURL, blobUrlParts.ContainerName, searchPrefix, extraSearchPrefix, preprocessor, processor, filters)
 }
 
-// HasDirectoryChangedSinceLastSync checks directory changed since lastSyncTime.
-// It honours CFDMode to make the decision, f.e., if CFDMode allows ctime/mtime to be used for CFD it may not need to query
-// attributes from target. If it returns True, TargetTraverser will enumerate the directory and compare each enumerated object
-// with the source scanned objects in ObjectIndexer[] to find out if the object needs to be sync'ed.
 //
-// Note: For CFDModes that allow ctime for CFD we can avoid enumerating target dir if we know directory has not changed.
-//       This increases sync efficiency.
+// Given a directory find out if it has changed since the last sync. A “changed” directory could mean one or more of the following:
+// 1. One or more new files/subdirs created inside the directory.
+// 2. One or more files/subdirs deleted.
+// 3. Directory is renamed.
 //
-// Note: If we discover that certain sources cannot be safely trusted for ctime update we can change this to return True for them,
-//       thus falling back on the more rigorous target<->source comparison.
+// It honours CFDMode to make the decision, f.e., if CFDMode allows ctime/mtime to be used for CFD it may not need to query attributes from target.
+//
+// If it returns True, TargetTraverser will enumerate the directory and compare each enumerated object with the source scanned objects in
+// ObjectIndexer[] to find out if the object needs to be sync'ed.
+//
+// For CFDModes that allow ctime for CFD we can avoid enumerating target dir if we know directory has not changed. This increases sync efficiency.
+//
+// Note: If we discover that certain sources cannot be safely trusted for ctime update we can change this to return True for them, thus falling back
+// on the more rigorous target<->source comparison. //
 func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, containerURL azblob.ContainerURL) bool {
-	// CFDMode is to enumerate Target and compare. So we return true in that case.
-	// This will lead to enumeration of target.
+	// Force enumeration for TargetCompare mode. For other CFDModes we enumerate a directory iff it has changed since last sync.
 	if t.cfdMode == common.CFDModeFlags.TargetCompare() {
 		return true
 	}
@@ -294,6 +298,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			panic("Directory entry is not string")
 		}
 
+		FinalizeAll := false
 		currentDirPath := dir.(string)
 
 		// This code for sync operation and when its target traverser.
@@ -314,6 +319,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		}
 
 		for marker := (azblob.Marker{}); marker.NotDone(); {
+			FinalizeAll = true
 			lResp, err := containerURL.ListBlobsHierarchySegment(t.ctx, marker, "/", azblob.ListBlobsSegmentOptions{Prefix: currentDirPath,
 				Details: azblob.BlobListingDetails{Metadata: true, Tags: t.s2sPreserveSourceTags}})
 			if err != nil {
@@ -419,6 +425,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				ContainerName:     containerName,
 				isVirtualFolder:   true,
 				isFolderEndMarker: true,
+				isFinalizeAll:     FinalizeAll,
 			}
 			enqueueOutput(storedObject, nil)
 		}
@@ -554,7 +561,7 @@ func (t *blobTraverser) serialList(containerURL azblob.ContainerURL, containerNa
 
 func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context, recursive, includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc,
 	s2sPreserveSourceTags bool, cpkOptions common.CpkOptions, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32,
-	lastSyncTime time.Time, cfdMode common.CFDMode, metaDataSyncOnly bool) (t *blobTraverser) {
+	lastSyncTime time.Time, cfdMode common.CFDMode, metaDataOnlySync bool) (t *blobTraverser) {
 
 	// No need to validate sync params as it's done in crawler.
 	t = &blobTraverser{
@@ -576,7 +583,7 @@ func newBlobTraverser(rawURL *url.URL, p pipeline.Pipeline, ctx context.Context,
 		lastSyncTime:             lastSyncTime,
 		cfdMode:                  cfdMode,
 		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
-		metaDataOnlySync:         metaDataSyncOnly,
+		metaDataOnlySync:         metaDataOnlySync,
 	}
 
 	if strings.ToLower(glcm.GetEnvironmentVariable(common.EEnvironmentVariable.DisableHierarchicalScanning())) == "true" {

@@ -96,6 +96,8 @@ type StoredObject struct {
 	isVirtualFolder bool
 
 	isFolderEndMarker bool
+
+	isFinalizeAll bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {
@@ -319,7 +321,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 	credential *common.CredentialInfo, followSymlinks *bool, listOfFilesChannel chan string, recursive, getProperties,
 	includeDirectoryStubs bool, incrementEnumerationCounter enumerationCounterFunc, listOfVersionIds chan string,
 	s2sPreserveBlobTags bool, logLevel pipeline.LogLevel, cpkOptions common.CpkOptions, errorChannel chan ErrorFileInfo,
-	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode common.CFDMode, metaDataSyncOnly bool) (ResourceTraverser, error) {
+	indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdMode common.CFDMode, metaDataOnlySync bool) (ResourceTraverser, error) {
 	var output ResourceTraverser
 	var p *pipeline.Pipeline
 
@@ -388,7 +390,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 				globChan, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, logLevel, cpkOptions)
 		} else {
 			output = newLocalTraverser(ctx, resource.ValueLocal(), recursive, toFollow, incrementEnumerationCounter, errorChannel, indexerMap, tqueue,
-				isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataSyncOnly)
+				isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataOnlySync)
 		}
 	case common.ELocation.Benchmark():
 		ben, err := newBenchmarkTraverser(resource.Value, incrementEnumerationCounter)
@@ -423,7 +425,7 @@ func InitResourceTraverser(resource common.ResourceString, location common.Locat
 		} else {
 			// TODO: Need to add error channel in case of blob traverse.
 			output = newBlobTraverser(resourceURL, *p, *ctx, recursive, includeDirectoryStubs, incrementEnumerationCounter, s2sPreserveBlobTags, cpkOptions, indexerMap,
-				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataSyncOnly)
+				tqueue, isSource, isSync, maxObjectIndexerSizeInGB, lastSyncTime, cfdMode, metaDataOnlySync)
 		}
 	case common.ELocation.File():
 		resourceURL, err := resource.FullURL()
