@@ -345,7 +345,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 								preprocessor,
 								getObjectNameOnly(strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING)),
 								strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING),
-								common.EEntityType.File(), // folder stubs are treated like files in in the serial lister as well
+								common.EEntityType.Folder(), // folder stubs are treated like files in in the serial lister as well
 								resp.LastModified(),
 								resp.ContentLength(),
 								resp,
@@ -354,7 +354,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 								containerName,
 							)
 							storedObject.lastChangeTime = extendedProp.CTime()
-							storedObject.isVirtualFolder = true
+							storedObject.lastModifiedTime = extendedProp.MTime()
 							if t.s2sPreserveSourceTags {
 								var BlobTags *azblob.BlobTags
 								BlobTags, err = fblobURL.GetTags(t.ctx, nil)
@@ -384,6 +384,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				storedObject := t.createStoredObjectForBlob(preprocessor, blobInfo, strings.TrimPrefix(blobInfo.Name, searchPrefix), containerName)
 				extendedProp, _ := common.ReadStatFromMetadata(blobInfo.Metadata, *blobInfo.Properties.ContentLength)
 				storedObject.lastChangeTime = extendedProp.CTime()
+				storedObject.lastModifiedTime = extendedProp.MTime()
 				if t.s2sPreserveSourceTags && blobInfo.BlobTags != nil {
 					blobTagsMap := common.BlobTags{}
 					for _, blobTag := range blobInfo.BlobTags.BlobTagSet {
@@ -429,7 +430,6 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				lastModifiedTime:  time.Time{},
 				size:              0,
 				ContainerName:     containerName,
-				isVirtualFolder:   true,
 				isFolderEndMarker: true,
 				isFinalizeAll:     FinalizeAll,
 			}

@@ -89,12 +89,6 @@ type StoredObject struct {
 	leaseStatus   azblob.LeaseStatusType
 	leaseDuration azblob.LeaseDurationType
 
-	// Added for new sync algorithm.
-	// If this StoredObject corresponds to a blob intermediate directory, isVirtualFolder is set to indicate that.
-	// As of now blob intermediate directory set as EntityTypeFile. But we need to make some decision on folder level,
-	// like whether folder changed since lastSyncTime or not and on that basis we do the target traversing.
-	isVirtualFolder bool
-
 	isFolderEndMarker bool
 
 	isFinalizeAll bool

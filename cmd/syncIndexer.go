@@ -158,7 +158,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	 *
 	 * The following code does that.
 	 */
-	if storedObject.isVirtualFolder || storedObject.entityType == common.EEntityType.Folder() {
+	if storedObject.entityType == common.EEntityType.Folder() {
 		lcFolderName = path.Join(lcFolderName, lcFileName)
 		if _, ok := i.folderMap[lcFolderName]; !ok {
 			i.folderMap[lcFolderName] = newObjectIndexer()
@@ -225,7 +225,7 @@ func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 
 	if folderMap, ok := i.folderMap[lcFolderName]; ok {
 		if so, ok := folderMap.indexMap["."]; ok {
-			if so.entityType != common.EEntityType.Folder() && !so.isVirtualFolder {
+			if so.entityType != common.EEntityType.Folder() {
 				panic(fmt.Sprintf("StoredObject for relative path[%s] not of type folder", lcFolderName))
 			}
 			delete(folderMap.indexMap, ".")

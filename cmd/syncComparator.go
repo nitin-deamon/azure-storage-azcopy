@@ -229,7 +229,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	}()
 
 	// Folder Case.
-	if destinationObject.isVirtualFolder || destinationObject.entityType == common.EEntityType.Folder() {
+	if destinationObject.entityType == common.EEntityType.Folder() {
 		if destinationObject.isFolderEndMarker {
 			// End Marker marks enumeration complete of the folder.
 			// End Marker come in following cases:-
@@ -261,7 +261,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 				sourceObjectInMap, present = foldermap.indexMap[lcFileName]
 				// Lets check if entry in source is folder and entry on destination should be folder.
 				// Otherwise folder in source changed to file.
-				if present && (destinationObject.entityType == sourceObjectInMap.entityType && sourceObjectInMap.isVirtualFolder) {
+				if present && (destinationObject.entityType == sourceObjectInMap.entityType) {
 					delete(foldermap.indexMap, lcFileName)
 					size := storedObjectSize(sourceObjectInMap)
 					size = -size
@@ -270,9 +270,10 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 						panic("Relative Path not matched")
 					}
 					delete(f.sourceFolderIndex.folderMap[lcFolderName].indexMap, lcFileName)
-					// create the folder if not present , O/W update its meta-data.
-					if f.disableComparison || !sourceObjectInMap.lastModifiedTime.Equal(destinationObject.lastModifiedTime) ||
-						!sourceObjectInMap.lastChangeTime.Equal(destinationObject.lastChangeTime) {
+
+					// In case of folder if ctime/mtime changed, lets create the folder.
+					dataChanged, metadataChanged := f.HasFileChangedSinceLastSyncUsingTargetCompare(destinationObject, sourceObjectInMap)
+					if f.disableComparison || dataChanged || metadataChanged {
 						err := f.copyTransferScheduler(sourceObjectInMap)
 						if err != nil {
 							return err
@@ -296,7 +297,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		sourceObjectInMap, present = foldermap.indexMap[lcFileName]
 
 		// if the destinationObject is present at source and stale, we transfer the up-to-date version from source
-		if present && (!sourceObjectInMap.isVirtualFolder && sourceObjectInMap.entityType == destinationObject.entityType) {
+		if present && (sourceObjectInMap.entityType == destinationObject.entityType) {
 			// Sanity check.
 			if sourceObjectInMap.relativePath != destinationObject.relativePath {
 				panic("Relative Path not matched")
@@ -342,7 +343,7 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingTargetCompar
 	// If mtime or size of target file is different from source file it means the file data (and metadata) has changed,
 	// else only metadata has changed.
 	//
-	if to.size != so.size || !so.lastModifiedTime.Equal(to.lastModifiedTime) {
+	if to.size != so.size || so.lastModifiedTime.UnixNano() != to.lastModifiedTime.UnixNano() {
 		return true, true
 	} else {
 		//
@@ -359,14 +360,14 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingTargetCompar
 			// We would have set target object’s ctime equal to source object’s ctime when we last sync’ed the object, so if it’s not equal now,
 			// it means the source object’s metadata was updated since last sync.
 			//
-			if so.lastChangeTime.After(to.lastChangeTime) {
+			if so.lastChangeTime.UnixNano() != to.lastChangeTime.UnixNano() {
 				if f.metaDataOnlySync {
 					return false, true
 				} else {
 					return true, true
 				}
 			}
-		} else if so.lastChangeTime.Sub(time.Time{}) != (to.lastChangeTime.Sub(time.Time{}) - time.Duration(time.Second*time.Duration(f.TargetCtimeSkew))) {
+		} else if so.lastChangeTime.UnixNano() > to.lastChangeTime.UnixNano()-time.Unix(int64(f.TargetCtimeSkew), 0).UnixNano() {
 			//
 			// Target object’s ctime is set locally on the target so we cannot compare for equality with the source object’s ctime.
 			// We can check if source object’s ctime was updated after target object’s ctime while accounting for the skew.
