@@ -184,13 +184,16 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 //
 func (i *folderIndexer) filesChangedInDirectory(relativePath string, lastSyncTime time.Time) bool {
 	var lcRelativePath string
+
 	if i.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(relativePath)
 	} else {
 		lcRelativePath = relativePath
 	}
+
 	i.lock.Lock()
 	defer i.lock.Unlock()
+
 	if foldermap, ok := i.folderMap[lcRelativePath]; ok {
 		for file := range foldermap.indexMap {
 			so := foldermap.indexMap[file]
@@ -212,6 +215,7 @@ func (i *folderIndexer) filesChangedInDirectory(relativePath string, lastSyncTim
 //
 func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 	var lcRelativePath string
+
 	if i.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(relativePath)
 	} else {
@@ -220,6 +224,7 @@ func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 	lcFolderName := filepath.Dir(lcRelativePath)
 	lcFileName := filepath.Base(lcRelativePath)
 	lcFolderName = path.Join(lcFolderName, lcFileName)
+
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
@@ -229,9 +234,12 @@ func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 				panic(fmt.Sprintf("StoredObject for relative path[%s] not of type folder", lcFolderName))
 			}
 			delete(folderMap.indexMap, ".")
-			size := storedObjectSize(so)
-			size = -size
-			atomic.AddInt64(&i.totalSize, size)
+
+			atomic.AddInt64(&i.totalSize, -storedObjectSize(so))
+			if atomic.LoadInt64(&i.totalSize) < 0 {
+				panic("Total Size is negative.")
+			}
+
 			return so
 		}
 	}

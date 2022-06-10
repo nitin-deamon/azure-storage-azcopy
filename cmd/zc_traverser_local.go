@@ -60,19 +60,16 @@ type localTraverser struct {
 	// For sync operation this flag tells whether this is source or target.
 	isSource bool
 
-	// Limit on size of objectIndexerMap in memory.
+	// see cookedSyncCmdArgs.maxObjectIndexerSizeInGB for details.
 	maxObjectIndexerSizeInGB uint32
 
-	// lastSyncTime to detect file/folder changed since this time.
-	// Only used when localTraverser is the target traverser.
+	// see cookedSyncCmdArgs.lastSyncTime for details.
 	lastSyncTime time.Time
 
-	// cfdMode is change file detection mode. How to detect the file/folder changed.
-	// Changed files can be detected on basis of ctime, ctimemtime , archiveBit or none.
-	// Only used when localTraverser is the target traverser.
+	// See cookedSyncCmdArgs.cfdMode for details.
 	cfdMode common.CFDMode
 
-	// In case of metadata change only, shall we transfer whole file or only metadata. This flag governs that.
+	// see cookedSyncCmdArgs.metaDataOnlySync for details.
 	metaDataOnlySync bool
 }
 

@@ -52,14 +52,14 @@ type syncDestinationComparator struct {
 	disableComparison bool
 
 	// Change file detection mode.
-	// For more information, please refer to cookedSyncCmdArgs.
+	// See cookedSyncCmdArgs.cfdMode for details.
 	cfdMode common.CFDMode
 
 	// Time of last Sync.
-	// For more information, please refer to cookedSyncCmdArgs.
+	// see cookedSyncCmdArgs.lastSyncTime for details.
 	lastSyncTime time.Time
 
-	// For more information, please refer to cookedSyncCmdArgs.
+	// see cookedSyncCmdArgs.metaDataOnlySync for details.
 	metaDataOnlySync bool
 
 	//
@@ -101,7 +101,7 @@ func newSyncDestinationComparator(i *folderIndexer, copyScheduler, cleaner objec
 func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(so StoredObject, filePath string) (dataChange bool, metadataChange bool) {
 	// CFDMode==TargetCompare always treats target directories as “changed”, so we should never be called for that
 	if f.cfdMode == common.CFDModeFlags.TargetCompare() {
-		panic("We should not be called for CFDMode==TargetCompare")
+		panic("HasFileChangedSinceLastSyncUsingLocalChecks() should not be called for CFDMode==TargetCompare")
 	}
 
 	// Changed file detection using Ctime and Mtime.
@@ -111,7 +111,14 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 			return true, true
 		} else if so.lastChangeTime.After(f.lastSyncTime) {
 			// File Ctime changed only, only meta data changed.
-			return false, true
+			//
+			// Else if ctime > LastSyncTime, then only metadata needs to be sync'ed.
+			// If MetadataOnlySync is True then we distinguish between data and metadata sync, else we always do data+metadata sync.
+			//
+			if f.metaDataOnlySync {
+				return false, true
+			}
+			return true, true
 		}
 		// File not changed at all.
 		return false, false
@@ -131,9 +138,8 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 			return false, false
 		}
 	} else {
-		// This is the case when neither CtimeMtime or Ctime cfdMode set. So its target traverse and if we reach here
-		// means these entries for new files.
-		return true, true
+		// This is the case when neither CtimeMtime or Ctime cfdMode set.
+		panic(fmt.Sprintf("HasFileChangedSinceLastSyncUsingLocalChecks() called for CFDMode==%s", f.cfdMode.String()))
 	}
 }
 
@@ -175,18 +181,15 @@ func (f *syncDestinationComparator) FinalizeTargetDirectory(folderMap *objectInd
 			storedObject := folderMap.indexMap[file]
 			size += storedObjectSize(storedObject)
 			delete(folderMap.indexMap, file)
-			metaDataChange, dataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
+			dataChange, metaDataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
 			if dataChange {
 				f.copyTransferScheduler(storedObject)
 			} else if metaDataChange {
-				// TODO: Add calls to just update meta data of file.
+				panic("Not yet implemented")
 			}
-
 		}
-
 	}
-	size = -size
-	atomic.AddInt64(&f.sourceFolderIndex.totalSize, size)
+	atomic.AddInt64(&f.sourceFolderIndex.totalSize, -size)
 
 	if atomic.LoadInt64(&f.sourceFolderIndex.totalSize) < 0 {
 		panic("Total Size is negative.")
@@ -203,12 +206,39 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	var present bool
 	var sourceObjectInMap StoredObject
 
+	//
+	// We come here with 'destinationObject' when Target traverser (parallelList() for Target=Blob) enumerates a directory from tqueue and
+	// creates and enqueues a destinationObject for each enumerated children. Target traverser also creates and enqueues a special
+	// destinationObject (with isFolderEndMarker==true) after queueing destinationObjects for all direct children of the directory.
+	// This special destinationObject is guaranteed to be queued *after* all the other children objects for the directory (if any).
+	// See below for more details on the special isFolderEndMarker object.
+	//
 	if f.sourceFolderIndex.isDestinationCaseInsensitive {
 		lcRelativePath = strings.ToLower(destinationObject.relativePath)
 	} else {
 		lcRelativePath = destinationObject.relativePath
 	}
 
+	//
+	// parent dir name, will be "." for files/dirs at the copy root.
+	//
+	// So, for lcRelativePath == "dir1/dir2",
+	// lcFolderName -> "dir1"
+	// lcFileName   -> "dir2"
+	//
+	// and for "dir1" (dir1 present at copy root),
+	// lcFolderName -> "."
+	// lcFileName   -> "dir1"
+	//
+	// Q: When will folderPresent be false below?
+	// A: Since we process every directory independently, if "dir1" is fully processed before "dir1/dir2",
+	//    when processIfNecessary() is called for "dir1/dir2" with isFolderEndMarker==true, foldermap["dir1"]
+	//    won't be found as it would have been deleted after "dir1" was fully processed, though we MUST have
+	//    foldermap["dir1/dir2"].
+	//    Also note that folderPresent MUST never be false when isFolderEndMarker==false, since target traverser
+	//    only ever enumerates directories added to tqueue by the source traverser and all such directories
+	//    MUST be added to folderMap by the source traverser.
+	//
 	lcFolderName = filepath.Dir(lcRelativePath)
 	lcFileName = filepath.Base(lcRelativePath)
 
@@ -231,28 +261,25 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 	// Folder Case.
 	if destinationObject.entityType == common.EEntityType.Folder() {
 		if destinationObject.isFolderEndMarker {
-			// End Marker marks enumeration complete of the folder.
-			// End Marker come in following cases:-
-			// 1. Dir not present on target side, then we need to create directory and files.
-			// 2. Dir present and some files are added.
-			// 3. Dir present and some files are modified.
-			// For each case we need to process left over files in ObjectIndexerMap.
-			if folderPresent {
-				if lcRelativePath != "" {
-					// We should not find this entry as it should be removed as part of parent enumeration only exception to this is root folder (that's what we checking in if statement).
-					// But due to go routine scheduling it may happen before parent enumeration at target finish or even start, other goroutine picked the child entry and finish the enumeration.
-					// In that case we don't need to do anything. If folder is empty and don't exist then will be created as parent enumeration done.
-					// If folder is not empty then it will be created by it's children. Only thing, it's metadata will be set by parent only as it has the required info.
-					fmt.Printf("lcRelativePath[%s], We should not find this entry as it should be removed as part of parent enumeration."+
-						"\n But due to go routine scheduling it may happen before parent enumeration at target finish child done with enumeration."+
-						"\n If folder is empty and don't exist then will be created as parent enumeration done. Otherwise will be created by its child enumeration."+
-						"\n Its metadata will be set by parent only as it has the required info.", lcRelativePath)
-				}
-			}
-
+			//
+			// We will see this special "end of folder" marker *after* we have seen all direct children of
+			// that directory (if any). We have the following cases:
+			// 1. destinationObject.relativePath directory does not exist in the target. In this case there won't be any children
+			//    of destinationObject.relativePath queued for us and we need to copy the directory recursively to the target.
+			// 2. destinationObject.relativePath directory exists in the target and the source directory has not "changed" since last
+			//    sync. In this case the Target traverser would have skipped enumeration of destinationObject.relativePath and hence
+			//    there won't be any children queued for us. We need to go over all its children added in sourceFolderIndex and test
+			//    them for "newness" and copy them if they are found modified after lastsync.
+			// 2. destinationObject.relativePath directory exists in the target and the source directory has "changed" since last sync.
+			//    In this case Target traverser would have enumerated the directory and queued all enumerated children for us. After all
+			//    the children it would have queued this special isFolderEndMarker object. So when we process the isFolderEndMarker object,
+			//    we would have processed all children and hence whatever is left in sourceFolderIndex for that directory are only the files
+			//    newly created in the source since last sync. We need to copy all of them to the target.
+			//
 			lcFolderName = path.Join(lcFolderName, lcFileName)
 			foldermap, folderPresent = f.sourceFolderIndex.folderMap[lcFolderName]
 			if folderPresent {
+				fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", lcFolderName, destinationObject.isFinalizeAll)
 				f.FinalizeTargetDirectory(foldermap, destinationObject.isFinalizeAll)
 			}
 			return nil
@@ -329,7 +356,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 }
 
 //
-// Given both the local and target attributes of the file, find out if we need to copy data, metadata, both, none.
+// Given both the local and target attributes of the file, find out if we need to copy data+metadata, only metadata, or none.
 // This is called by TargetTraverser for children of directories that may have "changed" as detected by
 // HasDirectoryChangedSinceLastSync(). For children of "changed" directories we cannot safely do local ctime
 // checks as children with the same local and remote path may actually be completely different files and we need to
@@ -338,6 +365,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 // Unlike HasFileChangedSinceLastSyncUsingLocalChecks(), it needs the target attributes also, which means it can only
 // be called for cases where we enumerate the target.
 //
+// Return: (dataChanged, metadataChanged)
 func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingTargetCompare(to StoredObject, so StoredObject) (bool, bool) {
 	//
 	// If mtime or size of target file is different from source file it means the file data (and metadata) has changed,

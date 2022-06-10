@@ -63,23 +63,23 @@ type blobTraverser struct {
 
 	// Hierarchical map of files and folders seen on source side.
 	indexerMap *folderIndexer
+
 	// Communication channel between source and destination traverser.
 	tqueue chan interface{}
 
-	// For sync operation this falg tells whether this is source or target.
+	// For sync operation this flag tells whether this is source or target.
 	isSource bool
 
-	// Limit on size of objectIndexerMap in memory.
+	// see cookedSyncCmdArgs.maxObjectIndexerSizeInGB for details.
 	maxObjectIndexerSizeInGB uint32
 
-	// lastSyncTime to detect file/folder changed since this time.
+	// see cookedSyncCmdArgs.lastSyncTime for details.
 	lastSyncTime time.Time
 
-	// cfdMode is change file detection mode. How to detect the file/folder changed.
-	// Changed files can be detected on basisi of ctime, ctimemtime , archiveBit or none.
+	// See cookedSyncCmdArgs.cfdMode for details.
 	cfdMode common.CFDMode
 
-	// In case of metadata change only, shall we transfer whole file or only metadata. This flag governs that.
+	// see cookedSyncCmdArgs.metaDataOnlySync for details.
 	metaDataOnlySync bool
 }
 
@@ -260,6 +260,11 @@ func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, contai
 		return true
 	}
 
+	//
+	// If CFDMode allows using ctime, compare directory ctime with LastSyncTime.
+	// Note that directory ctime will change if a new object is created inside the
+	// directory or an existing object is deleted or the directory is renamed.
+	//
 	if t.cfdMode == common.CFDModeFlags.CtimeMtime() {
 		if so.lastChangeTime.After(t.lastSyncTime) {
 			return true
@@ -269,60 +274,109 @@ func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, contai
 		if so.lastChangeTime.After(t.lastSyncTime) {
 			return true
 		} else if t.metaDataOnlySync && t.indexerMap.filesChangedInDirectory(so.relativePath, t.lastSyncTime) {
-			// Listing of blob gives properties and each list api gives 5K blobs in single rest call. So if we know any file changed on source,
-			// We should list the target. It's optimization instead of getting properties for changed files one by one get properties of all blob.
-			// As in normal scenario, there will be less than 2K files in a folder. It make sense to call list api, if any file changed on source.
+			//
+			// If metaDataOnlySync is true and a file has "ctime > LastSyncTime" and CFDMode does not allow us to use mtime for checking if the
+			// file's data+metadata or only metadata has changed, then we need to compare the file's source attributes with target attributes.
+			// Since fetching attributes for individual target file may be expensive for some targets (f.e. Blob), so it would be better to enumerate
+			// the target parent dir which will be cheaper due to ListDir returning many files and their attributes in a single call. In normal scenario,
+			// there will be less than 2K files in a folder and all 2K files along with their attributes can be retrieved in a single ListDir call.
+			// If not even one file changed in a directory we don't need to compare attributes for any file and hence we don't fetch the attributes.
+			//
 			return true
 		} else {
 			return false
 		}
 	} else {
-		// Lets try to get the properties for directory.
-		blobURL := containerURL.NewBlobURL(strings.TrimSuffix(so.relativePath, common.AZCOPY_PATH_SEPARATOR_STRING))
-		resp, err := blobURL.GetProperties(context.TODO(), azblob.BlobAccessConditions{}, azblob.ClientProvidedKeyOptions{})
-		if err != nil {
-			return true
-		}
-		// Note: ContentLength gives the size of the blob in bytes. For a page blob, this header returns the value of the x-ms-blob-content-length header that is stored with the blob.
-		if so.lastModifiedTime.After(resp.LastModified()) || so.size != resp.ContentLength() {
-			return true
-		} else {
-			return false
-		}
+		panic(fmt.Sprintf("Unsupported CFDMode: %d", t.cfdMode))
 	}
 }
 
 func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, containerName string, searchPrefix string,
 	extraSearchPrefix string, preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) error {
+	// Find whether call for target Traverser or not.
+	targetTraverser := t.isSync && !t.isSource
+
+	//
 	// Define how to enumerate its contents
 	// This func must be thread safe/goroutine safe
+	//
+	// For the sync case, this is called for each directory added to tqueue by the source traverser. Note that since source traverser will add
+	// directories present in the source, it may or may not be present in the target. If a directory is not present in the target, that's a case
+	// of newly created directory at the source which must be created in the target. It should enumerate only the direct children of the directory
+	// and create a storedObject for each and queue them for processing by processIfNecessary. Apart from queueing storedObject for each direct children,
+	// it'll also queue a special storedObject for "finalize" processing. This will be queued *after* all the children.
+	//
 	enumerateOneDir := func(dir parallel.Directory, enqueueDir func(parallel.Directory), enqueueOutput func(parallel.DirectoryEntry, error)) error {
 		if _, ok := dir.(string); !ok {
 			panic("Directory entry is not string")
 		}
 
+		//
+		// Flag to be passed in FinalizeDirectory to indicate to the receiver (processIfNecessary()) if it should copy all the files or call
+		// HasFileChangedSinceLastSyncUsingLocalChecks() to find out files that need to be copied.
+		//
 		FinalizeAll := false
 		currentDirPath := dir.(string)
 
 		// This code for sync operation and when its target traverser.
-		if t.isSync && !t.isSource {
+		if targetTraverser {
 			so := t.indexerMap.getStoredObject(currentDirPath)
-			currentDirPath = so.relativePath
+
+			if currentDirPath != so.relativePath {
+				panic(fmt.Sprintf("curentDirPath[%s] not matched with storedObject relative path[%s]", currentDirPath, so.relativePath))
+			}
 
 			// source traverser (local traverser) truncate all the forward slash in storedObject.
 			// Without forward slash list blob not list blobs under this directory.
 			if currentDirPath != "" {
-				currentDirPath = currentDirPath + "/"
+				if currentDirPath[len(currentDirPath)-1] != '/' {
+					currentDirPath = currentDirPath + "/"
+				}
 			}
 
-			// Check the directory if we need enumeration at target side or not.
+			//
+			// If source directory has not changed since last sync, then we don't really need to enumerate the target. SourceTraverser would have enumerated
+			// this directory and added all the children in ObjectIndexer map. We just need to go over these objects and find out which of these need to be
+			// sync'ed to target and sync them appropriately (data+metadata or only metadata).
+			//
+			// If directory has changed then there could be some files deleted and to find them we need to enumerate the target directory and compare. Also,
+			// if directory is renamed then also it'll be considered changed. Note that a renamed directory needs to be fully enumerated at the target as even
+			// files with same names as in the target could be entirely different files. This forces us to enumerate the target directory if the source
+			// directory is seen to have changed, since we don’t know if it was renamed, in which case we must enumerate the target directory.
+			//
 			if !t.HasDirectoryChangedSinceLastSync(so, containerURL) {
 				goto FinalizeDirectory
 			}
 		}
 
+		//
+		// Now that we are going to enumerate the target dir, we will process all files present in the target, and when FinalizeDirectory is called only those
+		// files will be left in the ObjectIndexer map which are newly created in source. We need to blindly copy all of these to the target.
+		// Set FinalizeAll to true to convey this to the receiver (processIfNecessary()).
+		//
+		FinalizeAll = true
+
+		//
+		// Enumerate direct children of currentDirPath (aka non-recursively for targetTraverser).
+		// Each child object we will call enqueueOutput() which will cause it to be sent to processIfNecessary() for processing where we will perform the "do we need to sync it"
+		// check. After currentDirPath is fully enumerated and all children queued for processing by processIfNecessary(), we also enqueue a special StoredObject to trigger the
+		// "end of directory" processing by processIfNecessary(). This StoredObject is marked by isFolderEndMarker flag. This indicates that we are done processing target objects.
+		// This could mean one of the following:
+		//
+		// 1. currentDirPath was found "not changed" and hence we didn't need to perform target enumeration. In this case we need to go over all StoredObjects
+		//    belonging to currentDirPath in sourceFolderIndex and see if they are modified after last sync and transfer if needed.
+		// 2. currentDirPath was found "changed" and hence we enumerated the target and we are done processing all enumerated children, so what's left now is
+		//    new files/subdirs created in source after lastSyncTime and we need to transfer them all. This is marked by setting FinalizeAll to true.
+		// 3. currentDirPath was not found in the target. In this case we need to create the directory in the target and transfer all its direct children. See Note below.
+		//
+		// Above is performed by the FinalizeTargetDirectory() method.
+		//
+		// Note: For the case of sync target traverser currentDirPath may not exist in the target (since it was picked from tqueue which means it exists at source but not necessarily
+		//       at the target). In that case the following enumeration will not yield anything, note that it'll not fail but simply result in "nothing". In that case we will go to
+		//       FinalizeDirectory and create a "end of folder" marker to be sent to processIfNecessary(). processIfNecessary() will perform the target directory creation.
+		//
 		for marker := (azblob.Marker{}); marker.NotDone(); {
-			FinalizeAll = true
+
 			lResp, err := containerURL.ListBlobsHierarchySegment(t.ctx, marker, "/", azblob.ListBlobsSegmentOptions{Prefix: currentDirPath,
 				Details: azblob.BlobListingDetails{Metadata: true, Tags: t.s2sPreserveSourceTags}})
 			if err != nil {
@@ -332,7 +386,9 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			// queue up the sub virtual directories if recursive is true
 			if t.recursive {
 				for _, virtualDir := range lResp.Segment.BlobPrefixes {
-					enqueueDir(virtualDir.Name)
+					if !targetTraverser {
+						enqueueDir(virtualDir.Name)
+					}
 
 					if t.includeDirectoryStubs {
 						// try to get properties on the directory itself, since it's not listed in BlobItems
@@ -420,13 +476,13 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		}
 
 	FinalizeDirectory:
-		if t.isSync && !t.isSource {
+		if targetTraverser {
 			// This storedObject marks the end of folder enumeration. Comparator after recieving end marker
 			// do the finalize operation on this directory.
 			storedObject := StoredObject{
 				name:              getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
 				relativePath:      strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
-				entityType:        common.EEntityType.File(), // folder stubs are treated like files in in the serial lister as well
+				entityType:        common.EEntityType.Folder(),
 				lastModifiedTime:  time.Time{},
 				size:              0,
 				ContainerName:     containerName,
