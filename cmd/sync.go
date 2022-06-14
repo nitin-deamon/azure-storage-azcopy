@@ -101,19 +101,7 @@ type rawSyncCmdArgs struct {
 	// For more information, please refer to cookedSyncCmdArgs.
 	metaDataOnlySync bool
 
-	//
-	// This is the time of last sync in ISO8601 format. This is compared with the source files' ctime/mtime value to find out if they have changed
-	// since the last sync and hence need to be copied. It's not used if the CFDMode is anything other than CTimeMTime and CTime, since in other
-	// CFDModes it's not considered safe to trust file times and we need to compare every file with target to find out which files have changed.
-	// There are a few subtelties that caller should be aware of:
-	//
-	// Since sync takes finite time, this should be set to the start of sync and not any later, else files that changed in the source while the
-	// last sync was running may be (incorrectly) skipped in this sync. Infact, to correctly account for any time skew between the machine running AzCopy
-	// and the machine hosting the source filesystem (if they are different, f.e., when the source is an NFS/SMB mount) this should be set to few seconds
-	// in the past. 60 seconds is a good value for skew adjustment. A larger skew value could cause more data to be sync'ed while a smaller skew value may
-	// cause us to miss some changed files, latter is obviously not desirable. If we are not sure what skew value to use, it's best to create a temp file
-	// on the source and compare its ctime with the nodes time and use that as a baseline.
-	//
+	// This is the time of last sync in ISO8601 format. For more information, please refer to cookedSyncCmdArgs.
 	lastSyncTime string
 }
 
@@ -131,16 +119,17 @@ func (raw *rawSyncCmdArgs) parsePatterns(pattern string) (cookedPatterns []strin
 	return
 }
 
-func (raw *rawSyncCmdArgs) parseCFDMode() common.CFDMode {
+func (raw *rawSyncCmdArgs) parseCFDMode() (common.CFDMode, error) {
 	cfdMode := strings.ToLower(raw.cfdMode)
-	if cfdMode == strings.ToLower(common.CFDModeFlags.TargetCompare().String()) {
-		return common.CFDModeFlags.TargetCompare()
-	} else if cfdMode == strings.ToLower(common.CFDModeFlags.Ctime().String()) {
-		return common.CFDModeFlags.Ctime()
+	if cfdMode == strings.ToLower(common.CFDModeFlags.TargetCompare().String()) || cfdMode == "" {
+		return common.CFDModeFlags.TargetCompare(), nil
 	} else if cfdMode == strings.ToLower(common.CFDModeFlags.CtimeMtime().String()) {
-		return common.CFDModeFlags.CtimeMtime()
+		return common.CFDModeFlags.CtimeMtime(), nil
+	} else if cfdMode == strings.ToLower(common.CFDModeFlags.Ctime().String()) {
+		return common.CFDModeFlags.Ctime(), nil
 	} else {
-		return common.CFDModeFlags.TargetCompare()
+		err := fmt.Errorf("Invalid input of cfd-mode.")
+		return common.CFDModeFlags.Ctime().NotDefined(), err
 	}
 }
 
@@ -279,8 +268,11 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 		return cooked, err
 	}
 
-	// Process the change directory mode for Sync operation.
-	cooked.cfdMode = raw.parseCFDMode()
+	// Process the change file detection mode for Sync operation.
+	cooked.cfdMode, err = raw.parseCFDMode()
+	if err != nil {
+		return cooked, err
+	}
 
 	// Parse lastSyncTime for comparsion.
 	if raw.lastSyncTime != "" {
@@ -289,7 +281,12 @@ func (raw *rawSyncCmdArgs) cook() (cookedSyncCmdArgs, error) {
 			return cooked, err
 		}
 	} else {
-		cooked.lastSyncTime = time.Time{}
+		if cooked.cfdMode == common.CFDModeFlags.TargetCompare() {
+			cooked.lastSyncTime = time.Time{}
+		} else {
+			err := fmt.Errorf("CFDMode[%s] requires valid last sync time", cooked.cfdMode.String())
+			return cooked, err
+		}
 	}
 
 	cooked.maxObjectIndexerMapSizeInGB, err = raw.parseMaxObjectIndexerMapInGB()
@@ -530,6 +527,18 @@ type cookedSyncCmdArgs struct {
 	//
 	metaDataOnlySync bool
 
+	//
+	// This is the time of last sync in ISO8601 format. This is compared with the source files' ctime/mtime value to find out if they have changed
+	// since the last sync and hence need to be copied. It's not used if the CFDMode is anything other than CTimeMTime and CTime, since in other
+	// CFDModes it's not considered safe to trust file times and we need to compare every file with target to find out which files have changed.
+	// There are a few subtelties that caller should be aware of:
+	//
+	// Since sync takes finite time, this should be set to the start of sync and not any later, else files that changed in the source while the
+	// last sync was running may be (incorrectly) skipped in this sync. Infact, to correctly account for any time skew between the machine running AzCopy
+	// and the machine hosting the source filesystem (if they are different, f.e., when the source is an NFS/SMB mount) this should be set to few seconds
+	// in the past. 60 seconds is a good value for skew adjustment. A larger skew value could cause more data to be sync'ed while a smaller skew value may
+	// cause us to miss some changed files, latter is obviously not desirable. If we are not sure what skew value to use, it's best to create a temp file
+	// on the source and compare its ctime with the nodes time and use that as a baseline.
 	//
 	// Time of last sync, used by the sync process.
 	// A file/directory having ctime/mtime greater than lastSyncTime is considered "changed", though the exact interpretation depends on the CFDMode
@@ -918,7 +927,7 @@ func init() {
 	syncCmd.PersistentFlags().BoolVar(&raw.preservePermissions, PreservePermissionsFlag, false, "False by default. Preserves ACLs between aware resources (Windows and Azure Files, or ADLS Gen 2 to ADLS Gen 2). For Hierarchical Namespace accounts, you will need a container SAS or OAuth token with Modify Ownership and Modify Permissions permissions. For downloads, you will also need the --backup flag to restore permissions where the new Owner will not be the user running AzCopy. This flag applies to both files and folders, unless a file-only filter is specified (e.g. include-pattern).")
 
 	// Changed file detection mode.
-	syncCmd.PersistentFlags().StringVar(&raw.cfdMode, "cfd-mode", "TargetCompare", " cfd-mode is Change File Detection Mode. It has valid values TargetCompare(default), Ctime, CtimeMtime, ArchiveBit."+
+	syncCmd.PersistentFlags().StringVar(&raw.cfdMode, "cfd-mode", "TargetCompare", " cfd-mode is Change File Detection Mode. It has valid values TargetCompare(default), Ctime, CtimeMtime."+
 		"\n TargetCompare - Default sync comparsion where target enumerated for each file. It's least optimized, but gurantee no data loss."+
 		"\n Ctime - Ctime used to detect change files/folder. Should be used where mtime not reliable."+
 		"\n CtimeMtime - Both Ctime	and Mtime used to detect changed files/folder. It's most efficient in all of the cfdModes."+
@@ -929,7 +938,7 @@ func init() {
 	syncCmd.PersistentFlags().BoolVar(&raw.metaDataOnlySync, "metadata-only-sync", false, "Optimization to transfer only metaData in case of metadata change only.")
 
 	// Time from which file change detection done.
-	syncCmd.PersistentFlags().StringVar(&raw.lastSyncTime, "last-sync-time", "", "Include files modified after lastSyncTime.")
+	syncCmd.PersistentFlags().StringVar(&raw.lastSyncTime, "last-sync-time", "", "Include files modified after lastSyncTime. Supported time format ISO8601, f.e. 2020-06-13T09:15:54+05:30")
 
 	// Limit on size of ObjectIndexerMap in memory.
 	syncCmd.PersistentFlags().StringVar(&raw.maxObjectIndexerMapSizeInGB, "max-indexer-map-size-gb", "", "maxObjectIndexerMapSizeInGB is the limit of map size in memory, provide the value in terms of GB")

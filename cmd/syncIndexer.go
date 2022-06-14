@@ -231,19 +231,13 @@ func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 	if folderMap, ok := i.folderMap[lcFolderName]; ok {
 		if so, ok := folderMap.indexMap["."]; ok {
 			if so.entityType != common.EEntityType.Folder() {
-				panic(fmt.Sprintf("StoredObject for relative path[%s] not of type folder", lcFolderName))
-			}
-			delete(folderMap.indexMap, ".")
-
-			atomic.AddInt64(&i.totalSize, -storedObjectSize(so))
-			if atomic.LoadInt64(&i.totalSize) < 0 {
-				panic("Total Size is negative.")
+				panic(fmt.Sprintf("StoredObject for relative path[%s] and folderName[%s] is not of type folder", relativePath, lcFolderName))
 			}
 
 			return so
 		}
 	}
-	panic(fmt.Sprintf("Stored Object for relative path[%s] not found", lcFolderName))
+	panic(fmt.Sprintf("Stored Object for relative path[%s] and folderName[%s] not found", relativePath, lcFolderName))
 }
 
 // getObjectIndexerMapSize return the size of map.

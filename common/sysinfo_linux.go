@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +14,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// GetMemInfo returns the MemAvailable on linux system.
+// GetMemAvailable returns the MemAvailable on linux system.
 // MemAvailable field added after 3.14+ kernel only. So for kernel version before that we need to give rough estimate.
 //
 // TODO: Estimating MemAvailable on kernel before 3.14.
-func GetMemInfo() (int64, error) {
+func GetMemAvailable() (int64, error) {
 
 	// command to get the Available Memory
 	cmdStr := `cat /proc/meminfo`
@@ -45,14 +44,19 @@ func GetMemInfo() (int64, error) {
 	// Scan the stdOutput.
 	for scanner.Scan() {
 		if strings.HasPrefix(scanner.Text(), "MemAvailable") {
-			var multipler int64
+			var multiplier int64
 			var result int
-			re := regexp.MustCompile(` +`)
-			value := strings.Split(string(re.ReplaceAll([]byte(scanner.Text()), []byte(" "))), " ")[1]
-			multiplerStr := strings.Split(string(re.ReplaceAll([]byte(scanner.Text()), []byte(" "))), " ")[2]
+			tokens := strings.Fields(scanner.Text())
+			if len(tokens) < 3 {
+				err := fmt.Errorf("Meminfo invalid ouput[%s]", scanner.Text())
+				return 0, err
+			}
+
+			value := tokens[1]
+			multiplerStr := tokens[2]
 
 			if multiplerStr == "kB" {
-				multipler = 1024
+				multiplier = 1024
 			} else {
 				// "/proc/meminfo" output always in kB only. If we are getting different string, something wrong.
 				err := fmt.Errorf("Meminfo value is not in kB")
@@ -62,7 +66,7 @@ func GetMemInfo() (int64, error) {
 			if result, err = strconv.Atoi(value); err != nil {
 				return 0, err
 			}
-			return int64(result) * int64(multipler), nil
+			return int64(result) * int64(multiplier), nil
 		}
 	}
 
@@ -71,7 +75,12 @@ func GetMemInfo() (int64, error) {
 		return 0, err
 	}
 
-	return 0, nil
+	// If we reached here, means MemAvailable entry not found in cat /proc/meminfo.
+	var kernelVersion unix.Utsname
+	_ = unix.Uname(&kernelVersion)
+
+	err = fmt.Errorf(fmt.Sprintf("MemAvailable entry not found, kernel version: %+v", kernelVersion))
+	return 0, err
 }
 
 // parseStat parse the output of stat and return common structure for stat and statx
@@ -133,7 +142,7 @@ func GetExtendedProperties(fileName string) (UnixStatAdapter, error) {
 		// dirfd is a null pointer, because we should only ever be passing relative paths here, and directories will be passed via transferInfo.Source.
 		// AT_SYMLINK_NOFOLLOW is not used, because we automagically resolve symlinks. TODO: Add option to not follow symlinks, and use AT_SYMLINK_NOFOLLOW when resolving is disabled.
 		err := unix.Statx(0, fileName,
-			unix.AT_STATX_SYNC_AS_STAT,
+			unix.AT_SYMLINK_NOFOLLOW|unix.AT_STATX_SYNC_AS_STAT,
 			unix.STATX_ALL,
 			&stat)
 

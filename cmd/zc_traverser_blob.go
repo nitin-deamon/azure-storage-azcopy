@@ -293,7 +293,11 @@ func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, contai
 
 func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, containerName string, searchPrefix string,
 	extraSearchPrefix string, preprocessor objectMorpher, processor objectProcessor, filters []ObjectFilter) error {
-	// Find whether call for target Traverser or not.
+
+	//
+	// If we are scanning the target in sync mode (aka TargetTraverser) we need to do some special handling.
+	// Set the following boolean to be used later in this function.
+	//
 	targetTraverser := t.isSync && !t.isSource
 
 	//
@@ -401,7 +405,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 								preprocessor,
 								getObjectNameOnly(strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING)),
 								strings.TrimSuffix(currentDirPath+virtualDir.Name, common.AZCOPY_PATH_SEPARATOR_STRING),
-								common.EEntityType.Folder(), // folder stubs are treated like files in in the serial lister as well
+								common.EEntityType.Folder(),
 								resp.LastModified(),
 								resp.ContentLength(),
 								resp,
@@ -483,8 +487,6 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 				name:              getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
 				relativePath:      strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
 				entityType:        common.EEntityType.Folder(),
-				lastModifiedTime:  time.Time{},
-				size:              0,
 				ContainerName:     containerName,
 				isFolderEndMarker: true,
 				isFinalizeAll:     FinalizeAll,
