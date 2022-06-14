@@ -254,7 +254,15 @@ func (t *blobTraverser) Traverse(preprocessor objectMorpher, processor objectPro
 //
 // Note: If we discover that certain sources cannot be safely trusted for ctime update we can change this to return True for them, thus falling back
 // on the more rigorous target<->source comparison. //
-func (t *blobTraverser) HasDirectoryChangedSinceLastSync(so StoredObject, containerURL azblob.ContainerURL) bool {
+func (t *blobTraverser) HasDirectoryChangedSinceLastSync(currentDirPath string) bool {
+	// Get the storedObject for currentDirPath to compare Ctime, Mtime for different mode.
+	// Although we don't need for CFDMode == TargetCompare, but need for sanity check.
+	so := t.indexerMap.getStoredObject(currentDirPath)
+
+	if currentDirPath != so.relativePath {
+		panic(fmt.Sprintf("curentDirPath[%s] not matched with storedObject relative path[%s]", currentDirPath, so.relativePath))
+	}
+
 	// Force enumeration for TargetCompare mode. For other CFDModes we enumerate a directory iff it has changed since last sync.
 	if t.cfdMode == common.CFDModeFlags.TargetCompare() {
 		return true
@@ -324,20 +332,6 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 
 		// This code for sync operation and when its target traverser.
 		if targetTraverser {
-			so := t.indexerMap.getStoredObject(currentDirPath)
-
-			if currentDirPath != so.relativePath {
-				panic(fmt.Sprintf("curentDirPath[%s] not matched with storedObject relative path[%s]", currentDirPath, so.relativePath))
-			}
-
-			// source traverser (local traverser) truncate all the forward slash in storedObject.
-			// Without forward slash list blob not list blobs under this directory.
-			if currentDirPath != "" {
-				if currentDirPath[len(currentDirPath)-1] != '/' {
-					currentDirPath = currentDirPath + "/"
-				}
-			}
-
 			//
 			// If source directory has not changed since last sync, then we don't really need to enumerate the target. SourceTraverser would have enumerated
 			// this directory and added all the children in ObjectIndexer map. We just need to go over these objects and find out which of these need to be
@@ -348,8 +342,16 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 			// files with same names as in the target could be entirely different files. This forces us to enumerate the target directory if the source
 			// directory is seen to have changed, since we don’t know if it was renamed, in which case we must enumerate the target directory.
 			//
-			if !t.HasDirectoryChangedSinceLastSync(so, containerURL) {
+			if !t.HasDirectoryChangedSinceLastSync(currentDirPath) {
 				goto FinalizeDirectory
+			}
+
+			// source traverser (local traverser) truncate all the forward slash in storedObject.
+			// Without forward slash list blob not list blobs under this directory.
+			if currentDirPath != "" {
+				if currentDirPath[len(currentDirPath)-1] != '/' {
+					currentDirPath = currentDirPath + "/"
+				}
 			}
 		}
 
@@ -483,6 +485,7 @@ func (t *blobTraverser) parallelList(containerURL azblob.ContainerURL, container
 		if targetTraverser {
 			// This storedObject marks the end of folder enumeration. Comparator after recieving end marker
 			// do the finalize operation on this directory.
+			// Note: Kept the containerName for debugging, mainly for multiple job with same source and different container.
 			storedObject := StoredObject{
 				name:              getObjectNameOnly(strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING)),
 				relativePath:      strings.TrimSuffix(currentDirPath, common.AZCOPY_PATH_SEPARATOR_STRING),
