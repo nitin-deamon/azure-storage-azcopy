@@ -89,15 +89,14 @@ type StoredObject struct {
 	leaseStatus   azblob.LeaseStatusType
 	leaseDuration azblob.LeaseDurationType
 
-	isFolderEndMarker bool
-
 	//
 	// For every folder processed by TargetTraverser it queues a special StoredObject (to be processed by processIfNecessary()) to mark the "end of directory".
 	// This causes the FinalizeTargetDirectory() to be called which does the "end of directory" processing like copying remaining files, etc. isFolderEndMarker
 	// marks this special "end of folder" StoredObject. isFinalizeAll is passed as an argument to FinalizeTargetDirectory() and it conveys whether TargetTraverser
 	// enumerated and processed contents of the directory or it did not (since the directory was considered "not changed since last sync".
 	//
-	isFinalizeAll bool
+	isFolderEndMarker bool
+	isFinalizeAll     bool
 }
 
 func (s *StoredObject) isMoreRecentThan(storedObject2 StoredObject) bool {

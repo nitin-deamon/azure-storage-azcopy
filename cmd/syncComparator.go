@@ -98,7 +98,7 @@ func newSyncDestinationComparator(i *folderIndexer, copyScheduler, cleaner objec
 // Note: Since data change usually causes metadata change too (LMT is updated at the least), caller should check dataChanged first and if that is true, sync
 //       both data+metadata, if dataChanged is not true then it should check metadataChanged and if that is true, sync only metadata, else sync nothing.
 //
-func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(so StoredObject, filePath string) (dataChange bool, metadataChange bool) {
+func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(so StoredObject) (dataChange bool, metadataChange bool) {
 	// CFDMode==TargetCompare always treats target directories as “changed”, so we should never be called for that
 	if f.cfdMode == common.CFDModeFlags.TargetCompare() {
 		panic("HasFileChangedSinceLastSyncUsingLocalChecks() should not be called for CFDMode==TargetCompare")
@@ -156,8 +156,12 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 // This condition is conveyed by passing the 2nd argument (FinalizeAll) as false.
 //
 // This function will also update the folder metaData, if changed which is in case of finalizeAll true and delete the flderMap from the ObjectIndexerMap.
-func (f *syncDestinationComparator) FinalizeTargetDirectory(folderMap *objectIndexer, finalizeAll bool, lcFolderName string) {
+func (f *syncDestinationComparator) FinalizeTargetDirectory(lcFolderName string, finalizeAll bool) {
 	var size int64
+
+	// No need to check folderPresent, as it's already checked by caller.
+	folderMap, _ := f.sourceFolderIndex.folderMap[lcFolderName]
+
 	//
 	// Go over all objects in the source directory, enumerated by SourceTraverser, and check each object for following:
 	//
@@ -165,57 +169,78 @@ func (f *syncDestinationComparator) FinalizeTargetDirectory(folderMap *objectInd
 	// 2. Does only metadata need to be sync'ed?
 	// 3. Object is not changed since last sync, no need to update.
 	//
-	// Note: For child folder we update its properties in it's finalizer.
-	// Child folder will be updated when they are enumerated. f.e. following directory structure present on source
-	// 1. [dir1][dir2]
-	// 2. [dir1][file1]
-	// 3. [dir2][file2]
-	// Its object indexer map entries will be following :-
-	// 1. [dir1]["."]
-	// 2. [dir1][dir2]
-	// 3. [dir1][file1]
-	// 4. [dir2]["."]
-	// 5. [dir2][file2]
-	// For dir1 finalizer we update folder properties of dir1 and file1. On dir2 finalizer we do dir2 folder properties updation and file2.
-	// As finalizer should be called for each folder, and it make sense to update its properties after creating its child files.
+	//
+	// Note: Finalizer is called for *every* directory present in the source and it's guaranteed to be called after all children of the directory are processed.
+	//       To be precise, when Finalizer is called for a directory we will need to process all remaining children of that directory before we return from
+	//       the Finalizer. Put another way, once Finalizer for a directory returns we shouldn't be looking at any children of the directory and hence, f.e.,
+	//       for directory "dir1/dir2"" all folderMap entries with folderMap["dir1/dir2"] will be deleted before we return from the Finalizer.
+	// For *every* folder we update its properties in its finalizer. f.e., for following directory structure present on source
+	//
+	// dir1/dir2
+	// dir1/file1
+	// dir2/file2
+	//
+	// the object indexer map entries will be following :-
+	//
+	// ["dir1"]["."]
+	// ["dir1"]["dir2"]
+	// ["dir1"]["file1"]
+	// ["dir2"]["."]
+	// ["dir2"]["file2"]
+	// ["dir1/dir2"]["."]
+	//
+	// In dir1's Finalizer we do the following:
+	//
+	// 1. Create target file dir1/file1.
+	// 2. Create target directory dir1/dir2.
+	//    Note: As an optimization, or for some targets, we can skip this as component directories will be auto-created when a resident file is created,
+	//          but note that this would mean that we won't create empty directories in the target.
+	// 3. Update properties for target directory dir1.
+	//
+	// Note that we can safely update the dir1 properties as this is after the last chidren of dir1 has been created.
 	//
 
 	// For FinalizeAll flag true, we know target traverser done. Now the files left in ObjectIndexerMap are the new ones.
 	// So, we don't do any ctime and mtime comparsion.
-	if finalizeAll {
-		for file := range folderMap.indexMap {
-			// Folder properties will be updated in the end. After all the files created.
-			if file == "." {
-				continue
-			}
-			storedObject := folderMap.indexMap[file]
-			size += storedObjectSize(storedObject)
-			delete(folderMap.indexMap, file)
-
-			if storedObject.entityType != common.EEntityType.Folder() {
-				f.copyTransferScheduler(storedObject)
-			}
+	for file := range folderMap.indexMap {
+		//
+		// ["dir1"]["."] is a special StoredObject for holding the properties for directory "dir1".
+		// This need not be created, so skip it now. In the end, once we are done creating all the
+		// files/dirs inside "dir1" we will update dir1's properties by querying from ["dir1"]["."].
+		//
+		if file == "." {
+			continue
 		}
-	} else {
-		// For FinalizeAll flag false, these are not the new files, we need to check whether file needs to be sync’ed and if yes,
-		// whether only metadata or both data+metadata need to be sync’ed.
-		for file := range folderMap.indexMap {
-			// No need to update folder properties as its not changed.
-			if file == "." {
-				continue
-			}
-			storedObject := folderMap.indexMap[file]
-			size += storedObjectSize(storedObject)
-			delete(folderMap.indexMap, file)
 
-			// Please refer comment on above.
+		storedObject := folderMap.indexMap[file]
+		size += storedObjectSize(storedObject)
+		delete(folderMap.indexMap, file)
+
+		// If finalizeAll==true we need to blindly copy *all* files/folders present in folderMap.indexMap.
+		dataChange, metaDataChange := true, true
+
+		// else, we need to find out if the file/folder has changed since last sync.
+		if finalizeAll == false {
+			dataChange, metaDataChange = f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject)
+		}
+
+		// TODO: Remove this code.
+		//       Till we add support for updating directory attributes, we prevent this directory
+		//       creation, else this clashes with the directory creation at the end of FinalizeTargetDirectory().
+		//       Once we add support for directory attributes updation, change that call to cause
+		//       directory attributes updation and not directory creation and remove this code.
+		//
+		if storedObject.entityType == common.EEntityType.Folder() {
+			dataChange = false
+		}
+
+		if dataChange {
+			// For folders, this should create a new empty folder if not present.
+			f.copyTransferScheduler(storedObject)
+		} else if metaDataChange {
+			// For folders, properties are sync'ed when the Finalizer for that folder is called.
 			if storedObject.entityType != common.EEntityType.Folder() {
-				dataChange, metaDataChange := f.HasFileChangedSinceLastSyncUsingLocalChecks(storedObject, storedObject.relativePath)
-				if dataChange {
-					f.copyTransferScheduler(storedObject)
-				} else if metaDataChange {
-					panic("Not yet implemented")
-				}
+				panic("File properties to be sync'ed. Not yet implemented")
 			}
 		}
 	}
@@ -229,7 +254,12 @@ func (f *syncDestinationComparator) FinalizeTargetDirectory(folderMap *objectInd
 
 	size += storedObjectSize(so)
 	delete(folderMap.indexMap, ".")
+
 	if finalizeAll {
+		//
+		// Note: We actually want to update the directory properties and *not* creat a new directory.
+		// Till we have support for updating the directory properties, we use this same call to create the directory.
+		//
 		f.copyTransferScheduler(so)
 	}
 
@@ -316,14 +346,15 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		//       lcRelativePath will be "" but the SourceTraverser would have stored it's properties in folderMap["."], path.Join() gets us "." for root directory.
 		//
 		lcFolderName = path.Join(lcFolderName, lcFileName)
-		foldermap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
+
+		_, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
 
 		if !folderPresent {
 			panic(fmt.Sprintf("Folder with relativePath[%s] not present in ObjectIndexerMap", lcRelativePath))
 		}
 
 		fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", lcFolderName, destinationObject.isFinalizeAll)
-		f.FinalizeTargetDirectory(foldermap, destinationObject.isFinalizeAll, lcFolderName)
+		f.FinalizeTargetDirectory(lcFolderName, destinationObject.isFinalizeAll)
 
 		return nil
 	}

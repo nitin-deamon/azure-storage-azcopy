@@ -128,7 +128,7 @@ func (raw *rawSyncCmdArgs) parseCFDMode() (common.CFDMode, error) {
 	} else if cfdMode == strings.ToLower(common.CFDModeFlags.Ctime().String()) {
 		return common.CFDModeFlags.Ctime(), nil
 	} else {
-		err := fmt.Errorf("Invalid input of cfd-mode.")
+		err := fmt.Errorf("Invalid value for cfd-mode: %s", raw.cfdMode)
 		return common.CFDModeFlags.Ctime().NotDefined(), err
 	}
 }

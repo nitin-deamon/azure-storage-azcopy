@@ -208,10 +208,11 @@ func (i *folderIndexer) filesChangedInDirectory(relativePath string, lastSyncTim
 }
 
 //
-// Given a relative path of an object this returns the StoredObject corresponding to that object.
-// This is called by the Target Traverser as it needs to lookup the StoredObject for making the
-// "should this object be sync'ed" decisions, and the StoredObject would have been added by the Source Traverser.
-// Source traverser add special entry with filename "." in a respective folder which stores storedobject of that folder.
+// Given the relative path of a directory this returns the StoredObject corresponding to that directory.
+// To be precise it returns the StoredObject stored in folderMap["dir1/dir2"]["."] for directory named "dir1/dir2."
+//
+// This MUST be called *only* by HasDirectoryChangedSinceLastSync() when it wants to find out if a directory dequeued from 'tqueue' must
+// be enumerated at the target. Such a StoredObject would have been added by the source traverser for each directory it adds to tqueue.
 //
 func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 	var lcRelativePath string
@@ -223,6 +224,11 @@ func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
 	}
 	lcFolderName := filepath.Dir(lcRelativePath)
 	lcFileName := filepath.Base(lcRelativePath)
+
+	//
+	// Note: We join lcFolderName and lcFileName to index into folderMap[] instead of directly indexing using lcRelativePath. This is because for the root directory,
+	//       lcRelativePath will be "" but the SourceTraverser would have stored it's properties in folderMap["."], path.Join() gets us "." for root directory.
+	//
 	lcFolderName = path.Join(lcFolderName, lcFileName)
 
 	i.lock.Lock()
