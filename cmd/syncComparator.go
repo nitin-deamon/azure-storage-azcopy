@@ -22,7 +22,6 @@ package cmd
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -156,22 +155,23 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 // This condition is conveyed by passing the 2nd argument (FinalizeAll) as false.
 //
 // This function will also update the folder metaData, if changed which is in case of finalizeAll true and delete the flderMap from the ObjectIndexerMap.
-func (f *syncDestinationComparator) FinalizeTargetDirectory(lcFolderName string, finalizeAll bool) {
+func (f *syncDestinationComparator) FinalizeTargetDirectory(relativeDir string, finalizeAll bool) {
 	var size int64
-	var lcRelativePath string
 
-	lcRelativePath = lcFolderName
-	if lcFolderName == "." {
-		lcRelativePath = ""
+	lcFolderName := relativeDir
+
+	// Note: For the root directory,relativeDir will be "" but the SourceTraverser would have stored it's properties in folderMap["."], so use "." for root directory.
+	if lcFolderName == "" {
+		lcFolderName = "."
 	}
 
 	folderMap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
 
 	if !folderPresent {
-		panic(fmt.Sprintf("Folder with relativePath[%s] not present in ObjectIndexerMap", lcRelativePath))
+		panic(fmt.Sprintf("Folder with relativePath[%s] not present in ObjectIndexerMap", relativeDir))
 	}
 
-	fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", lcRelativePath, finalizeAll)
+	fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", relativeDir, finalizeAll)
 
 	//
 	// Go over all objects in the source directory, enumerated by SourceTraverser, and check each object for following:
@@ -353,12 +353,7 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		//    we would have processed all children and hence whatever is left in sourceFolderIndex for that directory are only the files
 		//    newly created in the source since last sync. We need to copy all of them to the target.
 		//
-		// Note: We join lcFolderName and lcFileName to index into folderMap[] instead of directly indexing using lcRelativePath. This is because for the root directory,
-		//       lcRelativePath will be "" but the SourceTraverser would have stored it's properties in folderMap["."], path.Join() gets us "." for root directory.
-		//
-		lcFolderName = path.Join(lcFolderName, lcFileName)
-
-		f.FinalizeTargetDirectory(lcFolderName, destinationObject.isFinalizeAll)
+		f.FinalizeTargetDirectory(lcRelativePath, destinationObject.isFinalizeAll)
 
 		return nil
 	}
