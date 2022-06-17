@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
@@ -157,7 +158,7 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	 *
 	 * The following code does that.
 	 */
-	if storedObject.isVirtualFolder || storedObject.entityType == common.EEntityType.Folder() {
+	if storedObject.entityType == common.EEntityType.Folder() {
 		lcFolderName = path.Join(lcFolderName, lcFileName)
 		if _, ok := i.folderMap[lcFolderName]; !ok {
 			i.folderMap[lcFolderName] = newObjectIndexer()
@@ -175,6 +176,74 @@ func (i *folderIndexer) store(storedObject StoredObject) (err error) {
 	atomic.AddInt64(&i.totalSize, size)
 
 	return
+}
+
+//
+// This MUST be called only with CFDMode==Ctime and MetadataOnlySync==true. This forces caller (target traverser) to use the more efficient ListDir for
+// getting file properties in bulk instead of querying individual file properties.
+//
+func (i *folderIndexer) filesChangedInDirectory(relativePath string, lastSyncTime time.Time) bool {
+	var lcRelativePath string
+
+	if i.isDestinationCaseInsensitive {
+		lcRelativePath = strings.ToLower(relativePath)
+	} else {
+		lcRelativePath = relativePath
+	}
+
+	i.lock.Lock()
+	defer i.lock.Unlock()
+
+	if foldermap, ok := i.folderMap[lcRelativePath]; ok {
+		for file := range foldermap.indexMap {
+			so := foldermap.indexMap[file]
+			if so.lastChangeTime.After(lastSyncTime) {
+				return true
+			}
+		}
+	} else {
+		panic(fmt.Sprintf("Folder map not present for this relativePath: %s", lcRelativePath))
+	}
+	return false
+}
+
+//
+// Given the relative path of a directory this returns the StoredObject corresponding to that directory.
+// To be precise it returns the StoredObject stored in folderMap["dir1/dir2"]["."] for directory named "dir1/dir2."
+//
+// This MUST be called *only* by HasDirectoryChangedSinceLastSync() when it wants to find out if a directory dequeued from 'tqueue' must
+// be enumerated at the target. Such a StoredObject would have been added by the source traverser for each directory it adds to tqueue.
+//
+func (i *folderIndexer) getStoredObject(relativePath string) StoredObject {
+	var lcRelativePath string
+
+	if i.isDestinationCaseInsensitive {
+		lcRelativePath = strings.ToLower(relativePath)
+	} else {
+		lcRelativePath = relativePath
+	}
+	lcFolderName := filepath.Dir(lcRelativePath)
+	lcFileName := filepath.Base(lcRelativePath)
+
+	//
+	// Note: We join lcFolderName and lcFileName to index into folderMap[] instead of directly indexing using lcRelativePath. This is because for the root directory,
+	//       lcRelativePath will be "" but the SourceTraverser would have stored it's properties in folderMap["."], path.Join() gets us "." for root directory.
+	//
+	lcFolderName = path.Join(lcFolderName, lcFileName)
+
+	i.lock.Lock()
+	defer i.lock.Unlock()
+
+	if folderMap, ok := i.folderMap[lcFolderName]; ok {
+		if so, ok := folderMap.indexMap["."]; ok {
+			if so.entityType != common.EEntityType.Folder() {
+				panic(fmt.Sprintf("StoredObject for relative path[%s] and folderName[%s] is not of type folder", relativePath, lcFolderName))
+			}
+
+			return so
+		}
+	}
+	panic(fmt.Sprintf("Stored Object for relative path[%s] and folderName[%s] not found", relativePath, lcFolderName))
 }
 
 // getObjectIndexerMapSize return the size of map.

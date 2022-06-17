@@ -60,17 +60,17 @@ type localTraverser struct {
 	// For sync operation this flag tells whether this is source or target.
 	isSource bool
 
-	// Limit on size of objectIndexerMap in memory.
+	// see cookedSyncCmdArgs.maxObjectIndexerSizeInGB for details.
 	maxObjectIndexerSizeInGB uint32
 
-	// lastSyncTime to detect file/folder changed since this time.
-	// Only used when localTraverser is the target traverser.
+	// see cookedSyncCmdArgs.lastSyncTime for details.
 	lastSyncTime time.Time
 
-	// cfdMode is change file detection mode. How to detect the file/folder changed.
-	// Changed files can be detected on basis of ctime, ctimemtime , archiveBit or none.
-	// Only used when localTraverser is the target traverser.
-	cfdMode CFDModeFlags
+	// See cookedSyncCmdArgs.cfdMode for details.
+	cfdMode common.CFDMode
+
+	// see cookedSyncCmdArgs.metaDataOnlySync for details.
+	metaDataOnlySync bool
 }
 
 func (t *localTraverser) IsDirectory(bool) bool {
@@ -403,7 +403,6 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 		if t.incrementEnumerationCounter != nil {
 			t.incrementEnumerationCounter(common.EEntityType.File())
 		}
-
 		err := processIfPassedFilters(filters,
 			newStoredObject(
 				preprocessor,
@@ -465,20 +464,27 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					t.incrementEnumerationCounter(entityType)
 				}
 
+				extendedProp, _ := common.GetExtendedProperties(common.CleanLocalPath(filePath))
+
+				so := newStoredObject(
+					preprocessor,
+					fileInfo.Name(),
+					strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
+					entityType,
+					fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
+					fileInfo.Size(),
+					noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
+					noBlobProps,
+					noMetdata,
+					"", // Local has no such thing as containers
+				)
+
+				so.lastChangeTime = extendedProp.CTime()
+
 				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
 				return processIfPassedFilters(filters,
-					newStoredObject(
-						preprocessor,
-						fileInfo.Name(),
-						strings.ReplaceAll(relPath, common.DeterminePathSeparator(t.fullPath), common.AZCOPY_PATH_SEPARATOR_STRING), // Consolidate relative paths to the azcopy path separator for sync
-						entityType,
-						fileInfo.ModTime(), // get this for both files and folders, since sync needs it for both.
-						fileInfo.Size(),
-						noContentProps, // Local MD5s are computed in the STE, and other props don't apply to local files
-						noBlobProps,
-						noMetdata,
-						"", // Local has no such thing as containers
-					), processor)
+					so,
+					processor)
 			}
 
 			// note: Walk includes root, so no need here to separately create StoredObject for root (as we do for other folder-aware sources)
@@ -565,7 +571,8 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 }
 
 func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, followSymlinks bool, incrementEnumerationCounter enumerationCounterFunc,
-	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32, lastSyncTime time.Time, cfdModes CFDModeFlags) *localTraverser {
+	errorChannel chan ErrorFileInfo, indexerMap *folderIndexer, tqueue chan interface{}, isSource bool, isSync bool, maxObjectIndexerSizeInGB uint32,
+	lastSyncTime time.Time, cfdModes common.CFDMode, metaDataOnlySync bool) *localTraverser {
 	// No need to validate sync parameters here as it will be done crawler.
 	traverser := localTraverser{
 		fullPath:                    common.CleanLocalPath(fullPath),
@@ -582,6 +589,8 @@ func newLocalTraverser(ctx *context.Context, fullPath string, recursive bool, fo
 		isSource:                 isSource,
 		lastSyncTime:             lastSyncTime,
 		maxObjectIndexerSizeInGB: maxObjectIndexerSizeInGB,
+		cfdMode:                  cfdModes,
+		metaDataOnlySync:         metaDataOnlySync,
 	}
 
 	return &traverser
