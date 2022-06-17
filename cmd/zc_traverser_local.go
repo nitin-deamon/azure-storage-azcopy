@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/nitin-deamon/azure-storage-azcopy/v10/common"
@@ -464,7 +463,8 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 				if t.incrementEnumerationCounter != nil {
 					t.incrementEnumerationCounter(entityType)
 				}
-				ctime := fileInfo.Sys().(*syscall.Stat_t).Ctim
+
+				extendedProp, _ := common.GetExtendedProperties(common.CleanLocalPath(filePath))
 
 				so := newStoredObject(
 					preprocessor,
@@ -479,7 +479,7 @@ func (t *localTraverser) Traverse(preprocessor objectMorpher, processor objectPr
 					"", // Local has no such thing as containers
 				)
 
-				so.lastChangeTime = time.Unix(ctime.Sec, ctime.Nsec)
+				so.lastChangeTime = extendedProp.CTime()
 
 				// This is an exception to the rule. We don't strip the error here, because WalkWithSymlinks catches it.
 				return processIfPassedFilters(filters,

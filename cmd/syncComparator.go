@@ -158,9 +158,20 @@ func (f *syncDestinationComparator) HasFileChangedSinceLastSyncUsingLocalChecks(
 // This function will also update the folder metaData, if changed which is in case of finalizeAll true and delete the flderMap from the ObjectIndexerMap.
 func (f *syncDestinationComparator) FinalizeTargetDirectory(lcFolderName string, finalizeAll bool) {
 	var size int64
+	var lcRelativePath string
 
-	// No need to check folderPresent, as it's already checked by caller.
-	folderMap, _ := f.sourceFolderIndex.folderMap[lcFolderName]
+	lcRelativePath = lcFolderName
+	if lcFolderName == "." {
+		lcRelativePath = ""
+	}
+
+	folderMap, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
+
+	if !folderPresent {
+		panic(fmt.Sprintf("Folder with relativePath[%s] not present in ObjectIndexerMap", lcRelativePath))
+	}
+
+	fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", lcRelativePath, finalizeAll)
 
 	//
 	// Go over all objects in the source directory, enumerated by SourceTraverser, and check each object for following:
@@ -347,13 +358,6 @@ func (f *syncDestinationComparator) processIfNecessary(destinationObject StoredO
 		//
 		lcFolderName = path.Join(lcFolderName, lcFileName)
 
-		_, folderPresent := f.sourceFolderIndex.folderMap[lcFolderName]
-
-		if !folderPresent {
-			panic(fmt.Sprintf("Folder with relativePath[%s] not present in ObjectIndexerMap", lcRelativePath))
-		}
-
-		fmt.Printf("Finalizing directory %s (FinalizeAll=%v)\n", lcFolderName, destinationObject.isFinalizeAll)
 		f.FinalizeTargetDirectory(lcFolderName, destinationObject.isFinalizeAll)
 
 		return nil

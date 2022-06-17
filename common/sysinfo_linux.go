@@ -26,7 +26,7 @@ func GetMemAvailable() (int64, error) {
 
 	stdOut, err := cmd.StdoutPipe()
 	if err != nil {
-		err := fmt.Errorf("GetMemInfo failed with error: %v", err)
+		err := fmt.Errorf("GetMemAvailable failed with error: %v", err)
 		return 0, err
 	}
 
@@ -34,7 +34,7 @@ func GetMemAvailable() (int64, error) {
 	scanner := bufio.NewScanner(stdOut)
 	err = cmd.Start()
 	if err != nil {
-		err := fmt.Errorf("GetMemInfo failed with error: %v", err)
+		err := fmt.Errorf("GetMemAvailable failed with error: %v", err)
 		return 0, err
 	}
 
@@ -48,7 +48,7 @@ func GetMemAvailable() (int64, error) {
 			var result int
 			tokens := strings.Fields(scanner.Text())
 			if len(tokens) != 3 {
-				err := fmt.Errorf("Meminfo invalid ouput[%s]", scanner.Text())
+				err := fmt.Errorf("GetMemAvailable invalid ouput[%s] of /proc/meminfo", scanner.Text())
 				return 0, err
 			}
 
@@ -59,7 +59,7 @@ func GetMemAvailable() (int64, error) {
 				multiplier = 1024
 			} else {
 				// "/proc/meminfo" output always in kB only. If we are getting different string, something wrong.
-				err := fmt.Errorf("Meminfo value is not in kB, output[%s]", scanner.Text())
+				err := fmt.Errorf("MemAvailable value is not in kB, output[%s]", scanner.Text())
 				return 0, err
 			}
 
